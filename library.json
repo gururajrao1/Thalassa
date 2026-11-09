@@ -535,6 +535,51 @@
    ],
    "n_segments": 1,
    "provenance": "DCLDE2013 Stellwagen Bank Raven log, DOI 10.25921/zaea-1s39 (DCLDE2013 RIWH 2009-03-28T05:30:40-05:00 63.4-154.3Hz)"
+  },
+  {
+   "label": "blue-like",
+   "file": "wild_blwh1.wav",
+   "vec": [
+    2.6115611632381066,
+    3.4623425428151386,
+    4.43060336112976,
+    -1.3543159040027557,
+    -0.1770517637122877,
+    0.467101325425463,
+    0.15625
+   ],
+   "n_segments": 5,
+   "provenance": "DCLDE2013 Stellwagen Bank Raven log, DOI 10.25921/zaea-1s39 (DCLDE2013 BLWH 2009-03-31T10:18:41-05:00 8.1-16.3Hz)"
+  },
+  {
+   "label": "blue-like",
+   "file": "wild_blwh2.wav",
+   "vec": [
+    2.269383450507612,
+    2.5968103711252652,
+    4.063834587732951,
+    -1.438287868501955,
+    -0.2908391570404154,
+    0.6147114162986722,
+    0.109375
+   ],
+   "n_segments": 1,
+   "provenance": "DCLDE2013 Stellwagen Bank Raven log, DOI 10.25921/zaea-1s39 (DCLDE2013 BLWH 2009-03-31T10:48:53-05:00 8.8-15.8Hz)"
+  },
+  {
+   "label": "blue-like",
+   "file": "wild_blwh3.wav",
+   "vec": [
+    2.4020459552418654,
+    3.3938486396677305,
+    3.925283968448639,
+    -1.425975252331918,
+    -0.3788134359578499,
+    0.39599528190336786,
+    0.15625
+   ],
+   "n_segments": 5,
+   "provenance": "DCLDE2013 Stellwagen Bank Raven log, DOI 10.25921/zaea-1s39 (DCLDE2013 BLWH 2009-03-31T17:33:44-05:00 14.9-20.4Hz)"
   }
  ]
 }

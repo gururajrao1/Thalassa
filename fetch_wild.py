@@ -40,8 +40,13 @@ def wav_params(blob):
 def want(targets=None):
     """{clip_name: (row, cap_s)}; spread across time, distinct rows."""
     targets = targets or {"FIWH": 8, "HUWH": 8, "RIWH": 6}
-    rows = [r for r in csv.DictReader(open(f"{OUT}/detections.csv"))
-            if r["Detection_Confidence"] == "Detected"]
+    log = os.path.join(OUT, "detections_2025.csv")
+    if not os.path.isfile(log):
+        log = os.path.join(OUT, "detections.csv")
+    rows = [r for r in csv.DictReader(open(log))
+            if r["Detection_Confidence"] == "Detected" or
+            (r["Species"] == "BLWH" and
+             r["Detection_Confidence"] == "Possibly_Detected")]
     picks, used, last_t, n = {}, set(), {}, {sp: 0 for sp in targets}
     for r in rows:
         sp = r["Species"]
@@ -59,6 +64,8 @@ def want(targets=None):
             continue
         if sp == "HUWH" and dur < 8.0:
             continue
+        if sp == "BLWH" and dur < 3.0:
+            continue
         if sp in last_t and (t0 - last_t[sp]).total_seconds() < 1800:
             continue  # spread >=30 min apart
         n[sp] += 1
@@ -71,8 +78,8 @@ def want(targets=None):
 
 
 LABEL_OF = {"FIWH": "fin-like", "HUWH": "humpback-like",
-              "RIWH": "unassigned"}
-LOWCUT_OF = {"FIWH": 10.0, "HUWH": 50.0, "RIWH": 50.0}
+              "RIWH": "unassigned", "BLWH": "blue-like"}
+LOWCUT_OF = {"FIWH": 10.0, "HUWH": 50.0, "RIWH": 50.0, "BLWH": 10.0}
 
 
 def main(targets=None):

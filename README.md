@@ -134,43 +134,45 @@ NOAA NCEI DCLDE 2013 Stellwagen Bank Raven log (81,748 annotations;
 DOI 10.25921/zaea-1s39, CC BY): range-fetched 30 s fin + 28/10 s
 humpback + 3 s right-whale confuser from 2 kHz archival WAVs —
 megabytes transferred, not terabytes. `eval_matrix.py` now scores
-probes + 4 assumed clips + 32 wild clips (12 fin, 12 humpback,
-8 right-whale confusers, two days):
+probes + 4 assumed clips + 35 wild clips (12 fin, 12 humpback,
+8 right-whale confusers, 3 blue, three days):
 
-Wild fin scores fin-like (12/12 across two days). Humpback fragments
-mostly abstain (too few repeat phrases for the structure gate) and
-low humpback moans split blue/fin — 2/12 called humpback. Right-whale
-upcalls abstain 8/8. Those misses are tracked in the report's
-`known_gaps`, not hidden.
+Wild fin scores fin-like (12/12) and right-whale confusers abstain
+(8/8). Humpback fragments mostly abstain and low humpback moans
+split blue/fin — 2/12 called humpback. First wild blue: 1/3
+(blwh1 blue-like 0.88; blwh2 too short to call, blwh3 reads
+fin-like). Those misses are tracked in the report's `known_gaps`,
+not hidden.
 
 | Slice | Acc | Macro-F1 | n |
 | --- | --- | --- | --- |
 | Probes (smoke) | 1.00 | 1.00 | 4 |
-| Wild DCLDE 2013 | 0.688 | 0.484 | 32 |
-| All rows | 0.75 | 0.723 | 40 |
+| Wild DCLDE 2013 | 0.657 | 0.551 | 35 |
+| All rows | 0.721 | 0.69 | 43 |
 
-First honest calibration: Platt slope +0.572, intercept +0.65, fit
-accuracy 0.722 (n=36 wild+assumed) — higher confidence now measurably
+First fitted calibration: Platt slope +0.669, intercept +0.45, fit
+accuracy 0.692 (n=39 wild+assumed) — higher confidence now measurably
 predicts correctness. Isochrony tested and rejected: onset-interval CV
 does not separate fin trains from song fragments on VAD segments.
 
 ## Named-whale recognizer (`python train_species.py`)
 
-Three families pitted head-to-head with leave-one-out over 40 clips
+Three families pitted head-to-head with leave-one-out over 43 clips
 (humpback / blue / fin / unassigned / other):
 
 | Model | LOO acc |
 | --- | --- |
-| A file-vector + logreg (7 syntax numbers) | 0.575 |
-| B token-histogram + logreg (64 code counts) | 0.525 |
-| C frozen AST + logreg | **0.775** |
+| A file-vector + logreg (7 syntax numbers) | 0.535 |
+| B token-histogram + logreg (64 code counts) | 0.465 |
+| C frozen AST + logreg | **0.744** |
 
 Winner C is saved to `models/species_head.pkl` and runs inside every
 pipeline as `payload["species_model"]` (label + confidence + top-3),
 next to the rule-based `species_hint` which stays the evidence
 baseline. AST inference samples ≤12 uniform 10 s windows so long files
-stay bounded. Confusion: humpback 12/16, fin 11/13, other 8/8, blue
-0/2 (only 2 blue clips exist — the weakest class, flagged).
+stay bounded. Confusion: humpback 12/16, fin 10/13, other 8/8, blue
+2/5 (first real wild blue clips added this round — still the
+thinnest class, flagged).
 
 ## Supervised probe (`python train_probe.py`)
 
