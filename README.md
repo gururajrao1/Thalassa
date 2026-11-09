@@ -133,6 +133,7 @@ training lock that keeps torch RNG streams from crossing threads.
 - Filterbank cache, per-stage `timings_s`, theme-level syntax layer.
 - `eval_matrix.py`: confusion matrix + P/R/F1 + threshold sweep +
   max-F1 operating point; Platt scaling refused until ≥30 wild clips.
+- Dashboard batch workers slider (1–4) driving parallel `run_batch`.
 
 ## Limits (honest)
 

@@ -54,6 +54,8 @@
       <input type="file" id="raven" accept=".txt,.tsv">
       <label>Batch WAVs (2+, compare populations)</label>
       <input type="file" id="batch" accept=".wav" multiple>
+      <label>Batch workers <span class="num" id="workersv">1</span></label>
+      <input type="range" id="workers" min="1" max="4" step="1" value="1">
       <div><button class="ghost" id="dlcfg">Config JSON</button></div>
     </details>
     <h2>Step 3 — Go</h2>

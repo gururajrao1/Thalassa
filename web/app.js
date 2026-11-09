@@ -47,6 +47,7 @@ fetch("/api/samples").then((r) => r.json()).then((d) => {
 });
 $("fmax").oninput = (e) => { $("fmaxv").textContent = e.target.value; };
 $("vad").oninput = (e) => { $("vadv").textContent = e.target.value; };
+$("workers").oninput = (e) => { $("workersv").textContent = e.target.value; };
 
 function params() {
   const p = Object.assign({}, PRESETS[psel.value]);
@@ -60,6 +61,7 @@ function params() {
   p.denoise_profile = $("denoise_profile").value;
   p.fmax = parseFloat($("fmax").value);
   p.vad_offset_db = parseFloat($("vad").value);
+  p.max_workers = parseInt($("workers").value, 10) || 1;
   return p;
 }
 $("dlcfg").onclick = () => {
