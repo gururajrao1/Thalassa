@@ -29,7 +29,7 @@ DEFAULT_K = 64
 DEFAULT_LOW = 50.0
 DEFAULT_HIGH = 4000.0
 # Bump when payload/artifact schema changes so old job caches go stale.
-CODEC_VERSION = 11
+CODEC_VERSION = 13
 
 # Filterbank cache: identical (bank, sr, n_fft, n_mels, fmin, fmax) builds the
 # same matrix, so reuse it across segments instead of rebuilding per segment.
@@ -1480,7 +1480,11 @@ def clip_band_energy(x, sr):
             "centroid_hz": round(float((spec * freqs).sum() / tot), 1)}
 
 
-def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None):
+def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None,
+                  n_diverse=None):
+    # n_diverse: repeat phrases containing >=2 distinct tokens. A pulse
+    # train of identical units repeats trivially (fin) — song needs
+    # varied-unit phrases. Defaults to n_phrases when not supplied.
     """Evidence-matched species assessment from measured acoustics.
 
     NOT a trained classifier: counts how many literature checks agree and
@@ -1511,6 +1515,9 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None):
     med_dur = float(np.median(durs))
     frac_low = float((cents < 200.0).mean())
     frac_vlow = float((peaks < 80.0).mean())
+    # Peak (fundamental) below 200Hz: harmonics pollute centroids of
+    # genuine low moans (blue probe reads centroid 341Hz, peak 44Hz).
+    frac_plow = float((peaks < 200.0).mean())
     gap = float(metrics.get("shuffle_gap_nats", 0.0))
     checks = {"humpback": [], "blue": [], "fin": []}
     # Weights: phrase repetition is near-definitional for humpback song.
@@ -1519,31 +1526,37 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None):
          f"median centroid {med_cent:.0f}Hz "
          f"({'broadband, song-like' if med_cent >= 300 else 'low, call-like'})"))
     n_units = len(stats)
-    # Full songs need 5+ repeat phrases; short fragments (<12 units)
-    # cannot exhibit that many, so the bar is proportional: 3+ repeats
-    # plus ordered syntax plus a song-like band (2 repeats in an 8 s
-    # noise clip is coincidence, not song — see bluewhale).
+    div = n_phrases if n_diverse is None else n_diverse
+    # Full songs need 5+ varied repeat phrases; short fragments (<12
+    # units) cannot exhibit that many, so the bar is proportional: 3+
+    # varied repeats plus ordered syntax plus a song-like band
+    # (2 repeats in an 8 s noise clip is coincidence — see bluewhale;
+    # identical-token repeats are pulse trains, not song — see fin).
     if n_units >= 12:
-        phrase_ok = n_phrases >= 5
+        phrase_ok = div >= 5
     else:
-        phrase_ok = n_phrases >= 3
+        phrase_ok = div >= 3
+    # Repetition of low narrowband pulses is the conventional-call
+    # pattern (fin trains); song repetition must be broadband to carry
+    # full weight.
+    phrase_w = 1.5 if med_cent >= 300.0 else 0.75
     checks["humpback"].append(
-        (phrase_ok, 1.5,
+        (phrase_ok, phrase_w,
          f"{n_phrases} repeat phrases, {n_themes} themes "
          f"(patterned song structure)"))
     checks["humpback"].append(
         (gap > 0.3, 1.0,
          f"shuffle gap +{gap:.2f} nats (order carries syntax)"))
     checks["blue"].append(
-        (frac_low >= 0.6, 1.2,
-         f"{frac_low * 100:.0f}% of units centroid below 200Hz "
+        (frac_plow >= 0.6, 1.2,
+         f"{frac_plow * 100:.0f}% of units peak below 200Hz "
          f"(low-frequency moans)"))
     checks["blue"].append(
         (med_dur >= 5.0, 0.8,
          f"median unit {med_dur:.1f}s "
          f"({'long moans' if med_dur >= 5 else 'short units'})"))
     checks["fin"].append(
-        (frac_vlow >= 0.6 and med_dur <= 2.5, 1.0,
+        (frac_vlow >= 0.6 and med_dur <= 2.5 and n_units >= 2, 1.0,
          f"{frac_vlow * 100:.0f}% of peaks below 80Hz, "
          f"median unit {med_dur:.1f}s (pulse-like)"))
     if n_units >= 12:
@@ -1577,9 +1590,17 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None):
         evidence.append("[gate] no repeat-phrase structure found" +
                         frag_note + " — humpback ruled out; blue/fin "
                         "need clean sub-50Hz data this pipeline filters out")
+    n_checks = {k: len(v) for k, v in checks.items()}
     if hits.get(label, 0) == 0:
         # No supporting evidence for any class: refuse to label.
         label, conf = "unassigned", 0.3 if not structured else 0.15
+    elif n_units == 1 and hits.get(label, 0) < n_checks.get(label, 1):
+        # A single unit with no context is ambiguous (low humpback moan
+        # vs blue D-call fragment vs lone fin pulse): abstain unless
+        # every check for the winning class agrees (e.g. long moan).
+        evidence.append("[gate] single unit, partial evidence — "
+                        "needs song context; abstaining")
+        label, conf = "unassigned", 0.25
     note = ("evidence-matched acoustics, not a trained classifier; "
             f"{meta.get('lowcut', 50.0):.0f}Hz low-cut applied in pipeline")
     return {"label": f"{label}-like" if label != "unassigned" else label,
@@ -1937,9 +1958,11 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
     except Exception:
         clip_e = None
     if spec_stats:
+        n_diverse = sum(1 for ph in phrases
+                        if len(set(ph.get("phrase", []))) >= 2)
         species_hint = match_species(spec_stats, meta, metrics_for_hints,
                                      len(phrases), len(themes),
-                                     clip_e=clip_e)
+                                     clip_e=clip_e, n_diverse=n_diverse)
     else:
         species_hint = provisional_species_hint(meta, metrics_for_hints)
     meaning_tags = provisional_meaning_tags(segments, metrics_for_hints,

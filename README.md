@@ -128,18 +128,25 @@ NOAA NCEI DCLDE 2013 Stellwagen Bank Raven log (81,748 annotations;
 DOI 10.25921/zaea-1s39, CC BY): range-fetched 30 s fin + 28/10 s
 humpback + 3 s right-whale confuser from 2 kHz archival WAVs —
 megabytes transferred, not terabytes. `eval_matrix.py` now scores
-probes + 4 assumed clips + 4 wild clips:
+probes + 4 assumed clips + 32 wild clips (12 fin, 12 humpback,
+8 right-whale confusers, two days):
+
+Wild fin scores fin-like (12/12 across two days). Humpback fragments
+mostly abstain (too few repeat phrases for the structure gate) and
+low humpback moans split blue/fin — 2/12 called humpback. Right-whale
+upcalls abstain 8/8. Those misses are tracked in the report's
+`known_gaps`, not hidden.
 
 | Slice | Acc | Macro-F1 | n |
 | --- | --- | --- | --- |
 | Probes (smoke) | 1.00 | 1.00 | 4 |
-| Wild DCLDE 2013 | 0.25 | 0.25 | 4 |
-| All rows | 0.667 | 0.658 | 12 |
+| Wild DCLDE 2013 | 0.688 | 0.484 | 32 |
+| All rows | 0.75 | 0.723 | 40 |
 
-Wild fin scores fin-like 0.99. Both humpback fragments abstain (too
-few repeat phrases for the n_phrases≥5 gate) and the right-whale
-upcall reads blue-like (no right-whale class exists). Those two
-failures are now tracked in the report's `known_gaps`, not hidden.
+First honest calibration: Platt slope +0.572, intercept +0.65, fit
+accuracy 0.722 (n=36 wild+assumed) — higher confidence now measurably
+predicts correctness. Isochrony tested and rejected: onset-interval CV
+does not separate fin trains from song fragments on VAD segments.
 
 ## Supervised probe (`python train_probe.py`)
 
@@ -167,11 +174,18 @@ Protocol proven; production needs 30+ wild clips per class.
   theme strip, session rail with stage timings, live UTC clock.
 - First wild labels via DCLDE 2013 range-fetch (`fetch_wild.py`).
 - Supervised AST probe head (`train_probe.py`, LOO protocol).
+- Fragment-tolerant song gate (proportional phrase bar), singleton
+  abstention rule, peak-based blue band, diversity-weighted phrases,
+  fin pulse-train gate (n≥2). Wild-calibrated, not tuned on probes.
+- Library grown to 26 entries with DOI provenance (`append_library.py`).
+- Matplotlib serialized under the training lock (parallel batch
+  corrupted shared font state).
 
 ## Limits (honest)
 
-- 8 wild/assumed + 4 synthetic clips scored; calibration and the
-  supervised head still need 30+ wild clips per class.
+- 36 wild/assumed + 4 synthetic clips scored; Platt fitted (n=36).
+  Per-class operating points and the supervised head still want 30+
+  wild clips per class.
 - Single hydrophone, no TDOA/localization, no streaming yet.
 - `ssl-kmeans` always falls back without real AVES/Perch weights.
 - Minutes-per-file CPU on long recordings; not buoy-ready.

@@ -14,6 +14,8 @@ import csv
 import json
 import os
 
+import numpy as np
+
 from app import PRESETS, run_job
 import eval_accuracy as EA
 
@@ -137,11 +139,30 @@ def main():
         sweep.append({"threshold": t, "accuracy": a, "macro_f1": m,
                       "per_class": o})
     best = max(sweep, key=lambda s: (s["macro_f1"], s["accuracy"]))
-    # Calibration guard: Platt scaling needs real N.
+    # Calibration: Platt scaling maps raw confidence -> P(correct),
+    # fit on wild+assumed rows only (never on synthetic probes).
     n_wild = sum(1 for r in rows if r[3])
-    calib = ("REFUSED: Platt scaling needs >=30 wild labeled clips "
-             f"(have {n_wild}); confidences remain uncalibrated placeholders."
-             if n_wild < 30 else "fit allowed")
+    wild_bare = [(t, p, c) for t, p, c, flag, _ in rows if flag]
+    if n_wild >= 30 and len({t for t, _, _ in wild_bare}) >= 2:
+        from sklearn.linear_model import LogisticRegression
+        X = np.array([[c] for _, _, c in wild_bare])
+        y = np.array([1 if t == p else 0 for t, p, _ in wild_bare])
+        if y.sum() > 0 and y.sum() < len(y):
+            platt = LogisticRegression().fit(X, y)
+            a, b = (float(platt.coef_[0][0]),
+                    float(platt.intercept_[0]))
+            cal_acc = float(platt.score(X, y))
+        else:
+            a, b, cal_acc = 0.0, 0.0, float((y == 1).mean())
+        calib = {"platt_slope": round(a, 3), "platt_intercept": round(b, 3),
+                 "fit_accuracy": round(cal_acc, 3), "n": n_wild,
+                 "note": ("slope>0 means higher confidence really predicts "
+                          "correctness; apply p=1/(1+exp(-(a*c+b))) before "
+                          "thresholding")}
+    else:
+        calib = (f"REFUSED: Platt scaling needs >=30 wild labeled clips "
+                 f"(have {n_wild}); confidences remain uncalibrated "
+                 f"placeholders.")
     os.makedirs("outputs_matrix", exist_ok=True)
     report = {
         "preset": CHAMPION,
