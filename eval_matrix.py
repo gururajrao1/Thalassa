@@ -42,16 +42,25 @@ CLIPS = [
     ("bluewhale", "blue-like", True, 10.0),
 ]
 
-# First wild labeled clips: DCLDE 2013 Stellwagen Bank Raven log
+# Wild labeled clips: DCLDE 2013 Stellwagen Bank Raven log
 # (NOAA NCEI DOI 10.25921/zaea-1s39), range-fetched by fetch_wild.py.
 # FIWH->fin-like, HUWH->humpback-like, RIWH->out-of-scope confuser
 # (no right-whale class exists; abstention is the correct answer).
-WILD = [
-    ("wild/wild_fiwh", "fin-like", "DCLDE2013 FIWH 2009-03-28 17.8-24.6Hz", 10.0),
-    ("wild/wild_huwh", "humpback-like", "DCLDE2013 HUWH 2009-03-28 69-651Hz", 50.0),
-    ("wild/wild_huwh2", "humpback-like", "DCLDE2013 HUWH 2009-03-28 36-648Hz", 50.0),
-    ("wild/wild_riwh", "unassigned", "DCLDE2013 RIWH confuser 70-174Hz upcall", 50.0),
-]
+# Manifest-driven: fetch_wild.py writes wild_dclde/manifest.csv.
+def _load_wild():
+    import csv as _csv
+    man = os.path.join("wild_dclde", "manifest.csv")
+    if not os.path.isfile(man):
+        return [("wild/wild_fiwh", "fin-like",
+                 "DCLDE2013 FIWH fallback", 10.0)]
+    rows = []
+    for r in _csv.DictReader(open(man)):
+        rows.append(("wild/" + os.path.splitext(r["file"])[0],
+                     r["true_label"], r["note"], float(r["lowcut"])))
+    return rows
+
+
+WILD = _load_wild()
 
 LABELS = ["humpback-like", "blue-like", "fin-like", "unassigned"]
 

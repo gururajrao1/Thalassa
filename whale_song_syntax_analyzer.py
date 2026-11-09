@@ -29,7 +29,7 @@ DEFAULT_K = 64
 DEFAULT_LOW = 50.0
 DEFAULT_HIGH = 4000.0
 # Bump when payload/artifact schema changes so old job caches go stale.
-CODEC_VERSION = 9
+CODEC_VERSION = 11
 
 # Filterbank cache: identical (bank, sr, n_fft, n_mels, fmin, fmax) builds the
 # same matrix, so reuse it across segments instead of rebuilding per segment.
@@ -1518,8 +1518,17 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None):
         (med_cent >= 300.0, 1.0,
          f"median centroid {med_cent:.0f}Hz "
          f"({'broadband, song-like' if med_cent >= 300 else 'low, call-like'})"))
+    n_units = len(stats)
+    # Full songs need 5+ repeat phrases; short fragments (<12 units)
+    # cannot exhibit that many, so the bar is proportional: 3+ repeats
+    # plus ordered syntax plus a song-like band (2 repeats in an 8 s
+    # noise clip is coincidence, not song — see bluewhale).
+    if n_units >= 12:
+        phrase_ok = n_phrases >= 5
+    else:
+        phrase_ok = n_phrases >= 3
     checks["humpback"].append(
-        (n_phrases >= 5, 1.5,
+        (phrase_ok, 1.5,
          f"{n_phrases} repeat phrases, {n_themes} themes "
          f"(patterned song structure)"))
     checks["humpback"].append(
@@ -1530,14 +1539,22 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None):
          f"{frac_low * 100:.0f}% of units centroid below 200Hz "
          f"(low-frequency moans)"))
     checks["blue"].append(
-        (med_dur >= 3.0, 0.8,
+        (med_dur >= 5.0, 0.8,
          f"median unit {med_dur:.1f}s "
-         f"({'long moans' if med_dur >= 3 else 'short units'})"))
+         f"({'long moans' if med_dur >= 5 else 'short units'})"))
     checks["fin"].append(
         (frac_vlow >= 0.6 and med_dur <= 2.5, 1.0,
          f"{frac_vlow * 100:.0f}% of peaks below 80Hz, "
          f"median unit {med_dur:.1f}s (pulse-like)"))
-    structured = n_phrases >= 5
+    if n_units >= 12:
+        structured = phrase_ok
+        frag_note = ""
+    else:
+        # Short fragments cannot exhibit 5 repeats: proportional bar —
+        # 3+ repeats + ordered syntax + song-like band.
+        structured = (phrase_ok and gap > 0.3 and med_cent >= 200.0)
+        frag_note = (f" (fragment rule: {n_phrases} phrases, "
+                     f"gap +{gap:.2f}, centroid {med_cent:.0f}Hz)")
     # Bayesian log-odds: flat prior, each check +/-w*1.4 nats.
     import math as _math
     logodds, hits = {}, {}
@@ -1557,9 +1574,9 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None):
     evidence = [f"[{'Y' if ok else 'n'}] {txt}"
                 for k, v in checks.items() for ok, _, txt in v]
     if not structured:
-        evidence.append("[gate] no repeat-phrase structure found — "
-                        "humpback ruled out; blue/fin need clean "
-                        "sub-50Hz data this pipeline filters out")
+        evidence.append("[gate] no repeat-phrase structure found" +
+                        frag_note + " — humpback ruled out; blue/fin "
+                        "need clean sub-50Hz data this pipeline filters out")
     if hits.get(label, 0) == 0:
         # No supporting evidence for any class: refuse to label.
         label, conf = "unassigned", 0.3 if not structured else 0.15
@@ -1977,9 +1994,12 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
         for t in s:
             freq[t] += 1
     freq = freq / freq.sum()
-    png, pdf = make_report(outdir, codebook, freq, np.asarray(P),
-                           vq_stats["loss_history"], gpt_hist, metrics, K,
-                           seqs=seqs, themes=themes)
+    # matplotlib's mathtext/font state is process-global: concurrent
+    # figures corrupt each other (parse errors), so serialize plotting.
+    with _TRAIN_LOCK:
+        png, pdf = make_report(outdir, codebook, freq, np.asarray(P),
+                               vq_stats["loss_history"], gpt_hist,
+                               metrics, K, seqs=seqs, themes=themes)
     _emit(progress_cb, "report", 0.95)
     if use_cache and os.path.isfile(input_path):
         import shutil

@@ -37,53 +37,46 @@ def wav_params(blob):
     return sr, ch, data_at + 8, dlen
 
 
-def want():
-    """(clip_name, species, want_seconds_cap)."""
+def want(targets=None):
+    """{clip_name: (row, cap_s)}; spread across time, distinct rows."""
+    targets = targets or {"FIWH": 8, "HUWH": 8, "RIWH": 6}
     rows = [r for r in csv.DictReader(open(f"{OUT}/detections.csv"))
             if r["Detection_Confidence"] == "Detected"]
-    picks = {}
-    used = set()
+    picks, used, last_t, n = {}, set(), {}, {sp: 0 for sp in targets}
     for r in rows:
         sp = r["Species"]
-        if sp in picks or sp not in ("FIWH", "HUWH", "RIWH"):
+        if sp not in targets or n[sp] >= targets[sp]:
+            continue
+        key = r["Start_DateTime_ISO8601"] + sp
+        if key in used:
             continue
         t0 = dt.datetime.fromisoformat(r["Start_DateTime_ISO8601"])
         t1 = dt.datetime.fromisoformat(r["End_DateTime_ISO8601"])
         dur = (t1 - t0).total_seconds()
         if sp == "RIWH" and not (0.5 <= dur <= 3.0):
             continue
-        if sp == "FIWH" and not (1.0 <= dur <= 40.0):
+        if sp == "FIWH" and dur < 1.0:
             continue
         if sp == "HUWH" and dur < 8.0:
             continue
-        picks[sp] = (r, 30.0 if sp == "FIWH" else min(dur, 30.0))
-        used.add(r["Start_DateTime_ISO8601"] + sp)
-        if len(picks) == 4 and sum(1 for k in picks if k != "RIWH") >= 3:
-            break
-    # need 2 fin + 2 humpback: second pass for extras, distinct rows
-    for r in rows:
-        sp = r["Species"]
-        if sp not in ("FIWH", "HUWH"):
-            continue
-        key = sp + "2"
-        if key in picks:
-            continue
-        if r["Start_DateTime_ISO8601"] + sp in used:
-            continue
-        t0 = dt.datetime.fromisoformat(r["Start_DateTime_ISO8601"])
-        t1 = dt.datetime.fromisoformat(r["End_DateTime_ISO8601"])
-        dur = (t1 - t0).total_seconds()
-        if dur < 5.0:
-            continue
-        picks[key] = (r, min(dur, 30.0))
-        used.add(r["Start_DateTime_ISO8601"] + sp)
-        if "FIWH2" in picks and "HUWH2" in picks:
+        if sp in last_t and (t0 - last_t[sp]).total_seconds() < 1800:
+            continue  # spread >=30 min apart
+        n[sp] += 1
+        picks[f"{sp}{n[sp]}"] = (r, 30.0 if sp == "FIWH" else min(dur, 30.0))
+        used.add(key)
+        last_t[sp] = t0
+        if all(n[sp] >= targets[sp] for sp in targets):
             break
     return picks
 
 
-def main():
-    picks = want()
+LABEL_OF = {"FIWH": "fin-like", "HUWH": "humpback-like",
+              "RIWH": "unassigned"}
+LOWCUT_OF = {"FIWH": 10.0, "HUWH": 50.0, "RIWH": 50.0}
+
+
+def main(targets=None):
+    picks = want(targets)
     print({k: (v[0]["Species"], v[0]["Start_DateTime_ISO8601"],
              v[0]["Low.Freq..Hz."], v[0]["High.Freq..Hz."]) for k, v in picks.items()})
     # header from first audio file to learn sr/channels
@@ -106,8 +99,12 @@ def main():
         off_s = max(0.0, off_s - pre)
         a = data_off + int(off_s * sr) * block
         b = a + int(cap * sr) * block - 1
-        raw = urllib.request.urlopen(
-            url(f"{PREFIX}/{fname}", a, b)).read()
+        try:
+            raw = urllib.request.urlopen(
+                url(f"{PREFIX}/{fname}", a, b)).read()
+        except Exception as e:  # missing chunk file: skip clip honestly
+            print(f"{clip}: SKIP {fname} ({e})")
+            continue
         import wave
         p = os.path.join(OUT, f"wild_{clip.lower()}.wav")
         with wave.open(p, "wb") as w:
@@ -117,6 +114,18 @@ def main():
             w.writeframes(raw)
         got[clip] = (p, len(raw) / block / sr)
         print(f"{clip}: {fname} +{off_s:.1f}s x{cap:.0f}s -> {p}")
+    import csv as _csv
+    with open(os.path.join(OUT, "manifest.csv"), "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["file", "true_label", "note", "lowcut"])
+        for clip, (r, cap) in picks.items():
+            if clip not in got:
+                continue  # skipped fetch: no row
+            sp = r["Species"]
+            w.writerow([f"wild_{clip.lower()}.wav", LABEL_OF[sp],
+                        f"DCLDE2013 {sp} {r['Start_DateTime_ISO8601']} "
+                        f"{r['Low.Freq..Hz.']}-{r['High.Freq..Hz.']}Hz",
+                        LOWCUT_OF[sp]])
     return got
 
 
