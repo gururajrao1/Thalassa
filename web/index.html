@@ -7,78 +7,96 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<header class="top">
-  <div><h1>Thalassa</h1></div>
-  <div class="station">HYDROPHONE STATION // NIGHT WATCH</div>
+<header class="mast">
+  <div class="wordmark"><span class="lamp" id="lamp"></span>THALASSA</div>
+  <div class="mast-meta">HYDROPHONE STATION · NIGHT WATCH · <span id="clock">--:--:--</span> UTC</div>
+  <div class="probe"><i id="probe"></i></div>
 </header>
 <main>
-  <aside class="toolbar">
-    <h2>Step 1 — Sound</h2>
-    <p class="hint">Upload a recording, or try a real humpback sample
-      in one click.</p>
-    <label>Your WAV (44.1 kHz)</label>
-    <input type="file" id="wav" accept=".wav">
+  <aside class="cmd">
+    <div class="step"><span class="n">01</span><div><h2>Sound</h2>
+      <p class="hint">Drop a recording, or fire a real humpback sample.</p></div></div>
+    <label class="fld">Your WAV (44.1 kHz)<input type="file" id="wav" accept=".wav"></label>
     <div id="samples"><p class="hint">Loading samples…</p></div>
-    <h2>Step 2 — Depth</h2>
-    <label>Preset</label><select id="preset"></select>
+    <div class="step"><span class="n">02</span><div><h2>Depth</h2>
+      <p class="hint">Champion preset already won the bench. Tune only if you must.</p></div></div>
+    <label class="fld">Preset<select id="preset"></select></label>
     <p class="hint" id="preset_hint"></p>
     <details>
       <summary>Advanced sound settings</summary>
-      <label>Acoustic units</label>
+      <label class="fld">Acoustic units
       <select id="units">
         <option>kmeans</option><option>fsq</option><option>vqvae</option>
         <option>ssl-kmeans</option><option>encodec-rvq</option>
-      </select>
-      <label>Denoise</label>
-      <select id="denoise"><option>gating</option><option>noisereduce</option></select>
-      <label><input type="checkbox" id="pcen"> PCEN frontend</label>
-      <label>PCEN preset</label>
+      </select></label>
+      <label class="fld">Denoise
+      <select id="denoise"><option>gating</option><option>noisereduce</option></select></label>
+      <label class="chk"><input type="checkbox" id="pcen"> PCEN frontend</label>
+      <label class="fld">PCEN preset
       <select id="pcen_preset"><option value="">custom</option><option>quiet</option>
-        <option>noisy</option><option>harsh</option></select>
-      <label><input type="checkbox" id="deltas"> Delta features</label>
-      <label><input type="checkbox" id="lowfreq"> Low-frequency mode
+        <option>noisy</option><option>harsh</option></select></label>
+      <label class="chk"><input type="checkbox" id="deltas"> Delta features</label>
+      <label class="chk"><input type="checkbox" id="lowfreq"> Low-frequency mode
         (10Hz, blue/fin)</label>
-      <label>Auditory frontend</label>
+      <label class="fld">Auditory frontend
       <select id="frontend">
         <option>mel</option><option>gammatone</option>
-      </select>
-      <label>Denoise profile</label>
+      </select></label>
+      <label class="fld">Denoise profile
       <select id="denoise_profile">
         <option>flat</option><option>sea</option>
-      </select>
-      <label>Mel top Hz <span class="num" id="fmaxv">4000</span></label>
-      <input type="range" id="fmax" min="2000" max="8000" step="500" value="4000">
-      <label>VAD offset dB <span class="num" id="vadv">7.0</span></label>
-      <input type="range" id="vad" min="3" max="15" step="0.5" value="7">
-      <label>Raven table (seeds)</label>
-      <input type="file" id="raven" accept=".txt,.tsv">
-      <label>Batch WAVs (2+, compare populations)</label>
-      <input type="file" id="batch" accept=".wav" multiple>
-      <label>Batch workers <span class="num" id="workersv">1</span></label>
-      <input type="range" id="workers" min="1" max="4" step="1" value="1">
+      </select></label>
+      <label class="fld">Mel top Hz <span class="num" id="fmaxv">4000</span>
+      <input type="range" id="fmax" min="2000" max="8000" step="500" value="4000"></label>
+      <label class="fld">VAD offset dB <span class="num" id="vadv">7.0</span>
+      <input type="range" id="vad" min="3" max="15" step="0.5" value="7"></label>
+      <label class="fld">Raven table (seeds)
+      <input type="file" id="raven" accept=".txt,.tsv"></label>
+      <label class="fld">Batch WAVs (2+, compare populations)
+      <input type="file" id="batch" accept=".wav" multiple></label>
+      <label class="fld">Batch workers <span class="num" id="workersv">1</span>
+      <input type="range" id="workers" min="1" max="4" step="1" value="1"></label>
       <div><button class="ghost" id="dlcfg">Config JSON</button></div>
     </details>
-    <h2>Step 3 — Go</h2>
+    <div class="step"><span class="n">03</span><div><h2>Go</h2></div></div>
     <button class="go" id="go">Analyze song</button>
+    <div class="status" id="status">Idle — pick a sound and press <b>Analyze song</b>.</div>
   </aside>
   <section class="stage">
-    <div class="status" id="status">Idle — pick a sound and press
-      <b>Analyze song</b>.</div>
-    <h2>Telemetry</h2>
+    <div class="verdict" id="verdict">
+      <div class="v-label">SPECIES VERDICT</div>
+      <div class="v-value" id="v_value">No analysis yet</div>
+      <div class="v-conf"><i id="v_bar"></i></div>
+      <div class="v-note" id="v_note">Run a sample to get a species call with evidence.</div>
+    </div>
     <div class="telemetry">
-      <div class="metric"><span>Segments</span><b id="m_seg">–</b></div>
+      <div class="metric wide"><span>Segments</span><b id="m_seg">–</b></div>
       <div class="metric"><span>Bigram PPL</span><b id="m_bi">–</b></div>
       <div class="metric"><span>GPT PPL</span><b id="m_gpt">–</b></div>
-      <div class="metric"><span>Codes used</span><b id="m_codes">–</b></div>
+      <div class="metric"><span>Codes</span><b id="m_codes">–</b></div>
+      <div class="metric"><span>Shuffle gap</span><b id="m_gap">–</b></div>
+      <div class="metric"><span>Phrases</span><b id="m_phr">–</b></div>
     </div>
+    <div class="themes" id="tstrip"></div>
     <div id="caption"></div>
     <div class="split">
       <div id="left"></div>
       <div id="right"></div>
     </div>
-    <h2>Batch comparison</h2>
+    <h2 class="sect">Batch comparison</h2>
     <div id="batch"></div>
   </section>
+  <aside class="side">
+    <h2 class="sect">Session</h2>
+    <div class="card"><h3>Run</h3><div class="kv" id="runmeta">–</div></div>
+    <div class="card"><h3>Stage timings</h3><div class="kv" id="timings">–</div></div>
+    <div class="card"><h3>Theme syntax</h3><div class="kv" id="tsyntax">–</div></div>
+    <div class="card"><h3>Legend</h3>
+      <p class="hint"><b class="ok">humpback-like</b> patterned song ·
+      <b class="ok">blue/fin-like</b> infrasound bands ·
+      <b class="warn">unassigned</b> abstention, not failure.</p>
+      <p class="hint">Shuffle gap &gt; 0.3 nats means unit order carries syntax. Entropy dips flag revolution candidates.</p></div>
+  </aside>
 </main>
 <script src="app.js"></script>
 </body>

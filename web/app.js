@@ -86,12 +86,47 @@ function tokline(s, job, i) {
     `theme ${s.theme ?? 0}${hz} · <code>${toks}</code>${play}</div>`;
 }
 
+function kv(obj) {
+  return Object.entries(obj).map(([k, v]) =>
+    `<div><span>${k}</span><b>${v}</b></div>`).join("");
+}
 function render(res) {
   const m = res.metrics, p = res.payload;
   $("m_seg").textContent = res.n_segments;
   $("m_bi").textContent = fmt(m.bigram_ppl);
   $("m_gpt").textContent = fmt(m.gpt_ppl);
   $("m_codes").textContent = `${m.codes_used}/64`;
+  $("m_gap").textContent = (m.shuffle_gap_nats >= 0 ? "+" : "") +
+    fmt(m.shuffle_gap_nats, 2);
+  $("m_phr").textContent = res.n_phrases;
+  const sp0 = p.species_hint;
+  const v = $("verdict");
+  if (sp0) {
+    const abst = sp0.label === "unassigned";
+    v.className = "verdict " + (abst ? "abstain" : "found");
+    $("v_value").textContent = sp0.label +
+      (abst ? " — no call" : "");
+    $("v_bar").style.width = Math.round(sp0.confidence * 100) + "%";
+    $("v_note").textContent = sp0.note +
+      ((sp0.evidence || []).length ?
+        " · " + sp0.evidence.filter((e) => e.startsWith("[Y]")).length +
+        " supporting checks" : "");
+  }
+  const th = (p.themes || []).slice(0, 24);
+  const mx = Math.max(1, ...th.map((t) => t.size));
+  $("tstrip").innerHTML = th.map((t) =>
+    `<i class="${t.size === mx ? "dom" : t.size * 2 >= mx ? "mid" : ""}" ` +
+    `style="flex:${t.size}" title="theme ${t.theme_id}: ${t.size} codes"></i>`).join("");
+  const meta = p.meta || {};
+  $("runmeta").innerHTML = kv({
+    file: (meta.input || "–").slice(-22), units: meta.units || "–",
+    segs: res.n_segments, dur: (meta.duration_s || 0) + "s"});
+  const ts = meta.timings_s || {};
+  $("timings").innerHTML = Object.keys(ts).length ? kv(ts) : "–";
+  const tsz = p.theme_syntax;
+  $("tsyntax").innerHTML = tsz ? kv({
+    entropy: tsz.entropy_bits + " bits",
+    transitions: tsz.n_transitions, motifs: tsz.n_unique_transitions}) : "–";
   const counts = {};
   p.segments.forEach((s) => s.tokens.forEach((t) => {
     counts[t] = (counts[t] || 0) + 1;
@@ -188,11 +223,15 @@ async function runSingle(useSample) {
     const pr = await (await fetch(`/api/progress/${job}`)).json();
     $("status").textContent =
       `Analyzing… ${pr.stage} ${Math.round(pr.frac * 100)}%`;
+    $("probe").style.width = Math.round(pr.frac * 100) + "%";
+    $("lamp").style.background = "var(--amber)";
     if (pr.stage === "done") break;
   }
   const res = await (await fetch(`/api/result/${job}`)).json();
   if (res.error) throw new Error(res.error);
   render(res);
+  $("probe").style.width = "100%";
+  $("lamp").style.background = "var(--sig)";
   $("status").textContent = "Done.";
 }
 
@@ -228,6 +267,9 @@ async function runBatch() {
       `<button class="ghost">population matrix</button></a></p>` : "");
   $("status").textContent = `Batch done: ${b.n_files} files.`;
 }
+setInterval(() => {
+  $("clock").textContent = new Date().toISOString().slice(11, 19);
+}, 1000);
 window.addEventListener("unhandledrejection", (e) => {
   $("status").textContent = "Error: " + e.reason;
 });

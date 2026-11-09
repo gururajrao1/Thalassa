@@ -42,6 +42,17 @@ CLIPS = [
     ("bluewhale", "blue-like", True, 10.0),
 ]
 
+# First wild labeled clips: DCLDE 2013 Stellwagen Bank Raven log
+# (NOAA NCEI DOI 10.25921/zaea-1s39), range-fetched by fetch_wild.py.
+# FIWH->fin-like, HUWH->humpback-like, RIWH->out-of-scope confuser
+# (no right-whale class exists; abstention is the correct answer).
+WILD = [
+    ("wild/wild_fiwh", "fin-like", "DCLDE2013 FIWH 2009-03-28 17.8-24.6Hz", 10.0),
+    ("wild/wild_huwh", "humpback-like", "DCLDE2013 HUWH 2009-03-28 69-651Hz", 50.0),
+    ("wild/wild_huwh2", "humpback-like", "DCLDE2013 HUWH 2009-03-28 36-648Hz", 50.0),
+    ("wild/wild_riwh", "unassigned", "DCLDE2013 RIWH confuser 70-174Hz upcall", 50.0),
+]
+
 LABELS = ["humpback-like", "blue-like", "fin-like", "unassigned"]
 
 
@@ -55,9 +66,14 @@ def ensure_probes():
 def predict(name, lowcut):
     base = dict(PRESETS[CHAMPION])
     params = dict(base, lowcut=lowcut)
-    wav = (os.path.join("outputs_eval", name + ".wav") if name.startswith("probe_")
-           else os.path.join("samples", name + ".wav"))
-    r = run_job(wav, os.path.join("outputs_matrix", name), params)
+    if name.startswith("probe_"):
+        wav = os.path.join("outputs_eval", name + ".wav")
+    elif name.startswith("wild/"):
+        wav = os.path.join("wild_dclde", name.split("/")[1] + ".wav")
+    else:
+        wav = os.path.join("samples", name + ".wav")
+    r = run_job(wav, os.path.join("outputs_matrix", name.replace("/", "_")),
+                params)
     sp = json.load(open(r["json"]))["species_hint"]
     return sp["label"], float(sp["confidence"])
 
@@ -88,6 +104,11 @@ def main():
         rows.append((true, pred, conf, assumed, name))
         if not assumed:
             probe_rows.append((true, pred, conf))
+    wild_rows = []
+    for name, true, note, lowcut in WILD:
+        pred, conf = predict(name, lowcut)
+        rows.append((true, pred, conf, note, name))
+        wild_rows.append((true, pred, conf))
         print(f"{name}: true={true} pred={pred} conf={conf:.2f} "
               f"({'assumed' if assumed else 'ground truth'})")
     # Confusion matrix over all rows (wild rows flagged).
@@ -98,6 +119,7 @@ def main():
     bare = [(t, p, c) for t, p, c, _, _ in rows]
     out, acc, macro, _ = prf(bare, 0.0)
     pout, pacc, pmacro, _ = prf(probe_rows, 0.0)
+    wout, wacc, wmacro, _ = prf(wild_rows, 0.0)
     # Threshold sweep (abstention): BirdNET-style operating points.
     sweep = []
     for i in range(1, 10):
@@ -119,6 +141,13 @@ def main():
         "all_rows_accuracy@0.0": acc,
         "probes_only": {"accuracy": pacc, "macro_f1": pmacro,
                         "note": "n=4, statistically meaningless, smoke only"},
+        "wild_dclde2013": {"accuracy": wacc, "macro_f1": wmacro,
+                           "per_class": wout,
+                           "known_gaps": [
+                               "short humpback fragments (<~10 segs) show too few "
+                               "repeat phrases for the n_phrases>=5 structure gate",
+                               "single right-whale upcalls match blue-like "
+                               "low-frequency evidence; no right-whale class exists"]},
         "threshold_sweep": sweep,
         "best_operating_point": {"threshold": best["threshold"],
                                  "macro_f1": best["macro_f1"],
@@ -133,6 +162,9 @@ def main():
         for t in LABELS:
             w.writerow([t] + [matrix[t][p] for p in LABELS])
     print(f"\nprobes-only: acc {pacc} macro-F1 {pmacro} (n=4, smoke only)")
+    print(f"wild DCLDE2013: acc {wacc} macro-F1 {wmacro} (n={len(wild_rows)})")
+    for (t, p, c), (name, _, note, _) in zip(wild_rows, WILD):
+        print(f"  {name}: true={t} pred={p} conf={c:.2f}")
     print(f"all rows: acc {acc} macro-F1 {macro}")
     print(f"best operating point: t={best['threshold']} "
           f"macro-F1={best['macro_f1']} acc={best['accuracy']}")

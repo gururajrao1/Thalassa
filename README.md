@@ -120,6 +120,35 @@ promoted on measured wins, not paper claims.
 Batch parallelism: `run_batch(..., max_workers=2)` gives 2.79x on 4
 probes (49.5 s → 17.7 s) with bit-identical output to serial, via a
 training lock that keeps torch RNG streams from crossing threads.
+Dashboard exposes it as a workers slider (1–4).
+
+## Wild data (first real labels, `python fetch_wild.py`)
+
+NOAA NCEI DCLDE 2013 Stellwagen Bank Raven log (81,748 annotations;
+DOI 10.25921/zaea-1s39, CC BY): range-fetched 30 s fin + 28/10 s
+humpback + 3 s right-whale confuser from 2 kHz archival WAVs —
+megabytes transferred, not terabytes. `eval_matrix.py` now scores
+probes + 4 assumed clips + 4 wild clips:
+
+| Slice | Acc | Macro-F1 | n |
+| --- | --- | --- | --- |
+| Probes (smoke) | 1.00 | 1.00 | 4 |
+| Wild DCLDE 2013 | 0.25 | 0.25 | 4 |
+| All rows | 0.667 | 0.658 | 12 |
+
+Wild fin scores fin-like 0.99. Both humpback fragments abstain (too
+few repeat phrases for the n_phrases≥5 gate) and the right-whale
+upcall reads blue-like (no right-whale class exists). Those two
+failures are now tracked in the report's `known_gaps`, not hidden.
+
+## Supervised probe (`python train_probe.py`)
+
+Frozen AST (AudioSet pretraining) + logistic regression, leave-one-out
+over 12 clips: 5/12. All 5 real humpbacks (2 wild DCLDE + 3 MBARI)
+classify correctly across sites; all 4 synthetic probes miss —
+AudioSet embeddings see them as out-of-distribution, which is itself
+the argument for wild data. Full-fit trains to 1.00 (memorization).
+Protocol proven; production needs 30+ wild clips per class.
 
 ## Upgrades log
 
@@ -134,11 +163,15 @@ training lock that keeps torch RNG streams from crossing threads.
 - `eval_matrix.py`: confusion matrix + P/R/F1 + threshold sweep +
   max-F1 operating point; Platt scaling refused until ≥30 wild clips.
 - Dashboard batch workers slider (1–4) driving parallel `run_batch`.
+- Thalassa console redesign: verdict-first banner, telemetry strip,
+  theme strip, session rail with stage timings, live UTC clock.
+- First wild labels via DCLDE 2013 range-fetch (`fetch_wild.py`).
+- Supervised AST probe head (`train_probe.py`, LOO protocol).
 
 ## Limits (honest)
 
-- Synthetic-probe-anchored; wild precision/recall needs ~30+ labeled
-  clips (DCLDE 2013 first).
+- 8 wild/assumed + 4 synthetic clips scored; calibration and the
+  supervised head still need 30+ wild clips per class.
 - Single hydrophone, no TDOA/localization, no streaming yet.
 - `ssl-kmeans` always falls back without real AVES/Perch weights.
 - Minutes-per-file CPU on long recordings; not buoy-ready.
