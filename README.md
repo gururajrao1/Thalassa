@@ -122,6 +122,12 @@ probes (49.5 s → 17.7 s) with bit-identical output to serial, via a
 training lock that keeps torch RNG streams from crossing threads.
 Dashboard exposes it as a workers slider (1–4).
 
+Streaming ingest: files over 25 MB upload in 30 s slices
+(`POST /api/stream/start|chunk|finish`). Each chunk returns a live
+VAD-only detection count while uploading; finish assembles the WAV
+and runs the normal pipeline job. Verified: 2-chunk bluewhale →
+partials 2+2 detections → full humpback-like verdict, 4 segments.
+
 ## Wild data (first real labels, `python fetch_wild.py`)
 
 NOAA NCEI DCLDE 2013 Stellwagen Bank Raven log (81,748 annotations;

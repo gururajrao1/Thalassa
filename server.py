@@ -164,6 +164,78 @@ def _do_analyze(job, wpath, outdir, p):
     PROGRESS[job] = {"stage": "done", "frac": 1.0}
 
 
+@app.post("/api/stream/start")
+async def stream_start():
+    sid = "stream_" + uuid.uuid4().hex[:12]
+    os.makedirs(os.path.join(JOBS_DIR, sid, "chunks"), exist_ok=True)
+    return {"session": sid}
+
+
+@app.post("/api/stream/chunk")
+async def stream_chunk(session: str = Form(...),
+                       index: int = Form(...),
+                       total: int = Form(...),
+                       file: UploadFile = File(...)):
+    sdir = os.path.join(JOBS_DIR, os.path.basename(session))
+    cdir = os.path.join(sdir, "chunks")
+    if not os.path.isdir(cdir):
+        raise HTTPException(404, "unknown stream session")
+    cpath = os.path.join(cdir, f"chunk_{int(index):04d}.wav")
+    _save(file, cpath)
+    # Live partial: fast VAD-only scan (approximate, no denoise/units).
+    try:
+        from whale_song_syntax_analyzer import (bandpass, load_wav,
+                                                vad_segments)
+        x, sr = load_wav(cpath)
+        bounds = vad_segments(bandpass(x, sr), sr)
+        return {"session": session, "index": int(index), "total": int(total),
+                "n_segments": len(bounds),
+                "duration_s": round(len(x) / sr, 2),
+                "done": int(index) + 1 >= int(total)}
+    except Exception as e:
+        raise HTTPException(400, f"chunk unreadable: {e}")
+
+
+@app.post("/api/stream/finish")
+async def stream_finish(background: BackgroundTasks,
+                        session: str = Form(...),
+                        preset: str = Form("Champion (encodec-rvq, efficient)"),
+                        params: str | None = Form(None)):
+    from scipy.io import wavfile as _wv
+    import numpy as _np
+    sdir = os.path.join(JOBS_DIR, os.path.basename(session))
+    cdir = os.path.join(sdir, "chunks")
+    if not os.path.isdir(cdir):
+        raise HTTPException(404, "unknown stream session")
+    parts = sorted(f for f in os.listdir(cdir) if f.endswith(".wav"))
+    if not parts:
+        raise HTTPException(400, "no chunks uploaded")
+    sr0, acc = None, []
+    for name in parts:
+        sr, x = _wv.read(os.path.join(cdir, name))
+        if x.ndim > 1:
+            x = x.mean(axis=1)
+        if sr0 is None:
+            sr0 = sr
+        elif sr != sr0:  # resample stragglers to the first chunk rate
+            from scipy.signal import resample_poly
+            from math import gcd
+            g = gcd(sr, sr0)
+            x = resample_poly(x.astype(_np.float64), sr0 // g, sr // g)
+        acc.append(_np.asarray(x).ravel())
+    full = _np.concatenate(acc)
+    full = full / (abs(full).max() + 1e-9)
+    wpath = os.path.join(sdir, "assembled.wav")
+    _wv.write(wpath, sr0, (0.9 * full * 32767).astype(_np.int16))
+    outdir = os.path.join(sdir, "out")
+    os.makedirs(outdir, exist_ok=True)
+    p = _parse_params(preset, params)
+    job = os.path.basename(sdir)
+    PROGRESS[job] = {"stage": "queued", "frac": 0.0}
+    background.add_task(_do_analyze, job, wpath, outdir, p)
+    return {"job": job}
+
+
 @app.get("/api/result/{job}")
 def result(job: str):
     rfile = os.path.join(JOBS_DIR, job, "result.json")

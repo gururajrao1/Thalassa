@@ -206,11 +206,72 @@ $("go").onclick = async () => {
   } finally { btn.disabled = false; }
 };
 
+function wavBlob(mono, sr) {
+  const n = mono.length, buf = new ArrayBuffer(44 + n * 2),
+    v = new DataView(buf);
+  const wstr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  wstr(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); wstr(8, "WAVEfmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); wstr(36, "data");
+  v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, mono[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buf], {type: "audio/wav"});
+}
+
+async function runStreamed(file) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const au = await ctx.decodeAudioData(await file.arrayBuffer());
+  await ctx.close();
+  const sr = au.sampleRate, win = 30 * sr, total = Math.ceil(au.length / win);
+  const ch0 = au.getChannelData(0);
+  const ch1 = au.numberOfChannels > 1 ? au.getChannelData(1) : null;
+  const {session} = await (await fetch("/api/stream/start",
+    {method: "POST"})).json();
+  let found = 0;
+  for (let i = 0; i < total; i++) {
+    const a = i * win, b = Math.min(au.length, a + win), n = b - a;
+    const mono = new Float32Array(n);
+    for (let k = 0; k < n; k++)
+      mono[k] = ch1 ? (ch0[a + k] + ch1[a + k]) / 2 : ch0[a + k];
+    const fd = new FormData();
+    fd.append("session", session);
+    fd.append("index", i); fd.append("total", total);
+    fd.append("file", wavBlob(mono, sr), `chunk_${i}.wav`);
+    const r = await fetch("/api/stream/chunk", {method: "POST", body: fd});
+    if (!r.ok) throw new Error(await r.text());
+    const part = await r.json();
+    found += part.n_segments;
+    $("status").textContent =
+      `Streaming chunk ${i + 1}/${total} — ${part.n_segments} ` +
+      `detections here, ${found} so far (live VAD scan).`;
+    $("probe").style.width = Math.round(((i + 1) / total) * 50) + "%";
+    $("lamp").style.background = "var(--amber)";
+  }
+  const ff = new FormData();
+  ff.append("session", session);
+  ff.append("preset", psel.value);
+  ff.append("params", JSON.stringify(params()));
+  const fin = await fetch("/api/stream/finish", {method: "POST", body: ff});
+  if (!fin.ok) throw new Error(await fin.text());
+  return (await fin.json()).job;
+}
+
 async function runSingle(useSample) {
+  const up = !useSample && $("wav").files[0];
+  if (up && up.size > 25 * 1024 * 1024) {
+    $("status").textContent = "Large file — streaming in 30 s slices…";
+    const job = await runStreamed(up);
+    await pollJob(job, 50);
+    return;
+  }
   $("status").textContent = "Analyzing… (up to a minute on CPU)";
   const fd = new FormData();
   if (useSample) fd.append("sample", useSample);
-  else fd.append("wav", $("wav").files[0]);
+  else fd.append("wav", up);
   fd.append("preset", psel.value);
   fd.append("params", JSON.stringify(params()));
   const rv = $("raven").files[0];
@@ -218,12 +279,17 @@ async function runSingle(useSample) {
   const r = await fetch("/api/analyze", {method: "POST", body: fd});
   if (!r.ok) throw new Error(await r.text());
   const {job} = await r.json();
+  await pollJob(job);
+}
+
+async function pollJob(job, base = 0) {
   for (;;) {
     await new Promise((w) => setTimeout(w, 1000));
     const pr = await (await fetch(`/api/progress/${job}`)).json();
     $("status").textContent =
       `Analyzing… ${pr.stage} ${Math.round(pr.frac * 100)}%`;
-    $("probe").style.width = Math.round(pr.frac * 100) + "%";
+    $("probe").style.width = base +
+      Math.round(pr.frac * (100 - base)) + "%";
     $("lamp").style.background = "var(--amber)";
     if (pr.stage === "done") break;
   }
