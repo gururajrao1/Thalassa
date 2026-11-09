@@ -154,6 +154,24 @@ accuracy 0.722 (n=36 wild+assumed) — higher confidence now measurably
 predicts correctness. Isochrony tested and rejected: onset-interval CV
 does not separate fin trains from song fragments on VAD segments.
 
+## Named-whale recognizer (`python train_species.py`)
+
+Three families pitted head-to-head with leave-one-out over 40 clips
+(humpback / blue / fin / unassigned / other):
+
+| Model | LOO acc |
+| --- | --- |
+| A file-vector + logreg (7 syntax numbers) | 0.575 |
+| B token-histogram + logreg (64 code counts) | 0.525 |
+| C frozen AST + logreg | **0.775** |
+
+Winner C is saved to `models/species_head.pkl` and runs inside every
+pipeline as `payload["species_model"]` (label + confidence + top-3),
+next to the rule-based `species_hint` which stays the evidence
+baseline. AST inference samples ≤12 uniform 10 s windows so long files
+stay bounded. Confusion: humpback 12/16, fin 11/13, other 8/8, blue
+0/2 (only 2 blue clips exist — the weakest class, flagged).
+
 ## Supervised probe (`python train_probe.py`)
 
 Frozen AST (AudioSet pretraining) + logistic regression, leave-one-out

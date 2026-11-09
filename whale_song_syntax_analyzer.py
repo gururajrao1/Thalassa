@@ -29,7 +29,7 @@ DEFAULT_K = 64
 DEFAULT_LOW = 50.0
 DEFAULT_HIGH = 4000.0
 # Bump when payload/artifact schema changes so old job caches go stale.
-CODEC_VERSION = 13
+CODEC_VERSION = 14
 
 # Filterbank cache: identical (bank, sr, n_fft, n_mels, fmin, fmax) builds the
 # same matrix, so reuse it across segments instead of rebuilding per segment.
@@ -1611,6 +1611,109 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None,
                          "med_dur_s": med_dur}}
 
 
+_SPECIES_MODEL = None
+_SPECIES_MODEL_TRIED = False
+
+
+def _species_model_predict(metrics, code_perp, codes_used, seqs, K,
+                         input_path=None):
+    """Supervised species head (train_species.py winner), loaded on demand.
+
+    Returns None when no trained head is shipped. Never raises: the
+    rule-based species_hint stays the evidence baseline either way.
+    """
+    global _SPECIES_MODEL, _SPECIES_MODEL_TRIED
+    if not _SPECIES_MODEL_TRIED:
+        _SPECIES_MODEL_TRIED = True
+        try:
+            import joblib as _joblib
+            here = os.path.dirname(os.path.abspath(__file__))
+            mp = os.path.join(here, "models", "species_head.pkl")
+            if os.path.isfile(mp):
+                _SPECIES_MODEL = _joblib.load(mp)
+        except Exception:
+            _SPECIES_MODEL = None
+    if not _SPECIES_MODEL:
+        return None
+    try:
+        import numpy as _np
+        kind = _SPECIES_MODEL.get("features", "A")
+        if kind == "C":
+            # Frozen AST head: sample <=12 uniform 10 s windows so long
+            # files stay bounded (~1 min CPU); mean-pool like training.
+            global _AST_FE, _AST_MODEL
+            import torch as _torch
+            from transformers import ASTFeatureExtractor as _FE, \
+                ASTModel as _AM
+            try:
+                _AST_FE, _AST_MODEL
+            except NameError:
+                _AST_FE, _AST_MODEL = None, None
+            if _AST_MODEL is None:
+                _AST_FE = _FE.from_pretrained(
+                    "MIT/ast-finetuned-audioset-10-10-0.4593")
+                _AST_MODEL = _AM.from_pretrained(
+                    "MIT/ast-finetuned-audioset-10-10-0.4593")
+                _AST_MODEL.eval()
+            _fe, _model = _AST_FE, _AST_MODEL
+            from scipy.io import wavfile as _wv
+            from scipy.signal import resample_poly as _rp
+            from math import gcd as _gcd
+            _rate, _data = _wv.read(input_path)
+            if _data.ndim > 1:
+                _data = _data.mean(axis=1)
+            _data = _np.asarray(_data, dtype=_np.float64)
+            if _rate != 16000:
+                _g = _gcd(_rate, 16000)
+                _data = _rp(_data, 16000 // _g, _rate // _g)
+            _data = _data[:16000 * 120].astype(_np.float32)
+            _win, _hop = 16000 * 10, 16000 * 5
+            _idx = list(range(0, max(1, len(_data) - _win + 1), _hop))
+            if len(_idx) > 12:
+                _idx = [ _idx[int(i * (len(_idx) - 1) / 11)]
+                         for i in range(12)]
+            _embs = []
+            with _torch.no_grad():
+                for _i in _idx:
+                    _w = _data[_i:_i + _win]
+                    if len(_w) < 16000:
+                        _w = _np.pad(_w, (0, 16000 - len(_w)))
+                    _inp = _fe(_w, sampling_rate=16000,
+                               return_tensors="pt")
+                    _embs.append(_model(**_inp).last_hidden_state
+                                 .mean(dim=1).squeeze(0).numpy())
+            x = _np.stack(_embs).mean(axis=0).reshape(1, -1)
+        elif kind == "B":
+            h = _np.zeros(K)
+            for s in seqs:
+                for t in s:
+                    if 0 <= t < K:
+                        h[t] += 1
+            x = (h / max(h.sum(), 1)).reshape(1, -1)
+        else:
+            m = metrics
+            x = _np.array([[
+                m.get("unigram_bits", 0.0), m.get("bigram_ppl", 0.0),
+                m.get("gpt_ppl", 0.0), m.get("zipf_slope", 0.0),
+                m.get("trigram_gap_nats", 0.0),
+                m.get("shuffle_gap_nats", 0.0),
+                codes_used]], dtype=float)
+        sc, clf = _SPECIES_MODEL["scaler"], _SPECIES_MODEL["clf"]
+        labels = _SPECIES_MODEL.get("labels", [])
+        proba = clf.predict_proba(sc.transform(x))[0]
+        i = int(_np.argmax(proba))
+        return {"label": labels[i] if i < len(labels) else "unassigned",
+                "confidence": round(float(proba[i]), 2),
+                "model": kind + ":logreg",
+                "top3": sorted(
+                    ((labels[j] if j < len(labels) else str(j),
+                      round(float(proba[j]), 2))
+                     for j in range(len(proba))),
+                    key=lambda kv: -kv[1])[:3]}
+    except Exception:
+        return None
+
+
 def provisional_species_hint(meta, metrics):
     fmax = float(meta.get("fmax", 4000.0))
     gap = float(metrics.get("shuffle_gap_nats", 0.0))
@@ -1967,6 +2070,8 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
         species_hint = provisional_species_hint(meta, metrics_for_hints)
     meaning_tags = provisional_meaning_tags(segments, metrics_for_hints,
                                             phrases=phrases)
+    species_model = _species_model_predict(
+        metrics, code_perp, codes_used, seqs, K, input_path)
     tsyntax = theme_syntax([s.get("theme", 0) for s in segments])
     _timings["syntax_s"] = round(_time.perf_counter() - _t, 3)
     _timings["total_s"] = round(_time.perf_counter() - _t0, 3)
@@ -1980,6 +2085,7 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
                "themes": themes,
                "theme_syntax": tsyntax,
                "species_hint": species_hint,
+               "species_model": species_model,
                "meaning_tags": meaning_tags,
                "codebook_vectors": codebook,
                "codebook": {"K": K, "dim": len(codebook[0]),

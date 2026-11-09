@@ -159,6 +159,11 @@ function render(res) {
     `${sp.label} · conf ${fmt(sp.confidence)} · ${sp.note}<br>` +
     ((sp.evidence || []).map((e) => `<div class="seg">${e}</div>`)
       .join("")) + `</div>` : "";
+  const sm = p.species_model ? `<div class="card"><h3>Learned model</h3>` +
+    `${sm.label} · conf ${fmt(sm.confidence)} · ${sm.model}` +
+    `<div class="seg">top-3: ${(sm.top3 || []).map((t) =>
+      `${t[0]} ${t[1]}`).join(" · ")}</div>` +
+    `<small>Supervised head; rules above stay the evidence baseline.</small></div>` : "";
   const lib = res.library && res.library.matches &&
     res.library.matches.length ?
     `<div class="card"><h3>Library match</h3>verdict: ` +
@@ -175,7 +180,7 @@ function render(res) {
     `<div class="card"><h3>Detections</h3>${segs}</div>` +
     (phrases ? `<div class="card"><h3>Phrases</h3>${phrases}</div>` : "") +
     (themes ? `<div class="card"><h3>Themes</h3>${themes}</div>` : "") +
-    sp + lib +
+    sp + sm + lib +
     (mt ? `<div class="card"><h3>Meaning</h3>${mt}</div>` : "");
   const F = res.files || {};
   const dl = (k, label) => F[k] ?

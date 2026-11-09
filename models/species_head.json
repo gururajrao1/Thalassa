@@ -1,0 +1,14 @@
+{
+ "features": "C",
+ "model": "logreg",
+ "loo_accuracy": 0.775,
+ "labels": [
+  "humpback",
+  "blue",
+  "fin",
+  "unassigned",
+  "other"
+ ],
+ "n": 40,
+ "note": "supervised head; rule-based match_species stays as the evidence baseline"
+}

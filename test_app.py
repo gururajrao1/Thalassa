@@ -26,6 +26,19 @@ def test_app_job_fast_cached(tmp_path):
     assert second.get("cached") is True
 
 
+def test_species_model_wired(tmp_path):
+    """Shipped learned head names the clip next to the rules."""
+    import eval_accuracy as EA
+    wav = EA.humpbackish()
+    params = dict(PRESETS["Champion (encodec-rvq, efficient)"])
+    res = run_job(wav, str(tmp_path / "m"), params)
+    with open(res["json"]) as f:
+        payload = json.load(f)
+    sm = payload.get("species_model")
+    assert sm and sm["label"] == "humpback"
+    assert sm["confidence"] > 0.5
+
+
 def test_batch_parallel_parity(tmp_path):
     """run_batch workers=2 must match workers=1 exactly (torch RNG lock)."""
     from whale_song_syntax_analyzer import generate_synthetic_wav
