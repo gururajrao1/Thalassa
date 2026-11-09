@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Humpback Whale Vocalization NLP & Acoustic Decoder (Project 6.1).
+"""Thalassa whale-song decoder: bioacoustic language pipeline.
 
 End-to-end bioacoustic language pipeline:
   hydrophone WAV (44.1 kHz) -> bandpass 50-4000 Hz + spectral-gating denoise
@@ -1372,7 +1372,7 @@ def make_report(outdir, codebook, freq, P, vq_hist, gpt_hist,
     except Exception:
         ax.set_title("Recurrence (unavailable)")
     n_themes = len(themes or [])
-    fig.suptitle("Humpback whale song syntax analysis  |  " +
+    fig.suptitle("Thalassa whale song syntax analysis  |  " +
                  "unigram H=%.2f bits  bigram PPL=%.1f  GPT PPL=%.1f  "
                  "codes %d/%d themes %d" % (metrics["unigram_bits"],
                                             metrics["bigram_ppl"],
@@ -2125,7 +2125,7 @@ def _apply_config(args, config_path):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        description="Humpback whale vocalization NLP & acoustic decoder.")
+        description="Thalassa whale-song decoder: bioacoustic language pipeline.")
     p.add_argument("--input", default=None, help="input hydrophone WAV path")
     p.add_argument("--input-dir", default=None,
                    help="batch mode: process every .wav in this folder")

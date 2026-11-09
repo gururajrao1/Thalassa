@@ -1,4 +1,4 @@
-"""Whale Song Console API server (FastAPI) + static dashboard.
+"""Thalassa API server (FastAPI) + static dashboard.
 
 Run:  uvicorn server:app --port 8000
 Then: open http://localhost:8000 in a browser.
@@ -36,7 +36,7 @@ def _library():
     except Exception:
         return []
 
-app = FastAPI(title="Whale Song Console")
+app = FastAPI(title="Thalassa")
 
 
 def _parse_params(preset: str, raw: str | None) -> dict:

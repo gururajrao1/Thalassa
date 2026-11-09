@@ -1,4 +1,4 @@
-"""Whale song syntax app (Streamlit MVP, local use).
+"""Thalassa Streamlit fallback (Streamlit MVP, local use).
 
 Run: streamlit run app.py  ->  open http://localhost:8501 in a browser.
 """
@@ -105,7 +105,7 @@ def run_batch_job(input_dir, outdir, params, progress_cb=None):
 def main():
     import streamlit as st
 
-    st.set_page_config(page_title="Whale Song Syntax", layout="wide")
+    st.set_page_config(page_title="Thalassa", layout="wide")
     st.markdown(
         "<style>"
         ":root{--abyss:#062631;--panel:#0a3646;--line:#14505f;"
@@ -128,7 +128,7 @@ def main():
         "<div>HYDROPHONE STATION // NIGHT WATCH</div>",
         unsafe_allow_html=True,
     )
-    st.title("Whale Song Syntax — Field Console")
+    st.title("Thalassa — Field Console")
     st.caption("Cetacean acoustic watch: detections on the left, "
                "sonar report on the right. Numbers are tabular.")
 

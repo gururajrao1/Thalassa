@@ -1,6 +1,7 @@
-# Humpback Whale Vocalization NLP & Acoustic Decoder
+# Thalassa — Whale-Song Decoder
 
-Standalone end-to-end bioacoustic language pipeline (Project 6.1).
+End-to-end bioacoustic language pipeline: hydrophone audio in, species,
+syntax, and population insight out.
 
 ## Console UI (full-fledged)
 
