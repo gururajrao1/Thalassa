@@ -49,34 +49,142 @@ def load16(path, sr=16000, cap_s=60.0):
     return data[:n].astype(np.float32)
 
 
-def embed(paths):
+AST_ID = "MIT/ast-finetuned-audioset-10-10-0.4593"
+
+# 10.24 s windows / 5 s hop: matches the shipped C-head cadence so clip
+# and segment embeddings stay comparable. Short inputs are padded.
+WIN, HOP, MINW = 16000 * 10, 16000 * 5, 16000
+
+
+def _windows(x):
+    return ([x[i:i + WIN] for i in range(0, max(1, len(x) - WIN + 1), HOP)]
+            or [x])
+
+
+def _as_float_audio(x):
+    """Match load16: int PCM -> [-1, 1] float32 (avoids int overflow in
+    filterbanks when callers pass raw wavfile arrays)."""
+    x = np.asarray(x)
+    if np.issubdtype(x.dtype, np.integer):
+        x = x.astype(np.float64) / float(np.iinfo(x.dtype).max)
+    return np.asarray(x, dtype=np.float32)
+
+
+def ast_embed_arrays(arrays, sr=16000):
+    """Frozen AST encoder, mean-pooled over time then windows (needs weights)."""
     import torch
     from transformers import ASTFeatureExtractor, ASTModel
-    fe = ASTFeatureExtractor.from_pretrained(
-        "MIT/ast-finetuned-audioset-10-10-0.4593")
-    model = ASTModel.from_pretrained(
-        "MIT/ast-finetuned-audioset-10-10-0.4593")
+    fe = ASTFeatureExtractor.from_pretrained(AST_ID)
+    model = ASTModel.from_pretrained(AST_ID)
     model.eval()
     vecs = []
     with torch.no_grad():
-        for path in paths:
-            x = load16(path)
-            # 10.24 s windows, mean-pool time then windows (frozen encoder).
-            win, hop = 16000 * 10, 16000 * 5
-            parts = [x[i:i + win] for i in range(0, max(1, len(x) - win + 1), hop)] or [x]
+        for x in arrays:
             embs = []
-            for w in parts:
-                if len(w) < 16000:
-                    w = np.pad(w, (0, 16000 - len(w)))
-                inp = fe(w, sampling_rate=16000,
-                         return_tensors="pt")
+            for w in _windows(_as_float_audio(x)):
+                if len(w) < MINW:
+                    w = np.pad(w, (0, MINW - len(w)))
+                inp = fe(w, sampling_rate=sr, return_tensors="pt")
                 h = model(**inp).last_hidden_state.mean(dim=1)
                 embs.append(h.squeeze(0).numpy())
             vecs.append(np.stack(embs).mean(axis=0))
-    return np.stack(vecs)
+    return np.stack(vecs).astype(np.float32)
 
 
-def main():
+def mel_pool_embed_arrays(arrays, sr=16000):
+    """Deterministic fallback embedding: mean-pooled log-mel, no weights.
+
+    Same windowing as the AST path so backends stay interchangeable; the
+    caller records ``used_fallback=True`` (SSLEmbeddingUnits convention).
+    """
+    from whale_song_syntax_analyzer import log_mel
+    vecs = []
+    for x in arrays:
+        x = _as_float_audio(x)
+        parts = []
+        for w in _windows(x):
+            if len(w) < MINW:
+                w = np.pad(w, (0, MINW - len(w)))
+            m = log_mel(w, sr)
+            parts.append(m.reshape(m.shape[0], -1).mean(axis=1))
+        vecs.append(np.stack(parts).mean(axis=0))
+    return np.stack(vecs).astype(np.float32)
+
+
+def embed_arrays(arrays, sr=16000, backend="auto"):
+    """Embed raw-audio arrays with a frozen foundation encoder.
+
+    backend: "auto" (AST, else mel-pool fallback), "ast", or "mel".
+    Returns (X, backend_used, used_fallback). Never silently swaps: the
+    used backend is always reported so benchmarks stay honest.
+    """
+    if backend == "mel":
+        return mel_pool_embed_arrays(arrays, sr), "mel", True
+    if backend == "ast":
+        return ast_embed_arrays(arrays, sr), "ast", False
+    try:
+        return ast_embed_arrays(arrays, sr), "ast", False
+    except Exception:
+        return mel_pool_embed_arrays(arrays, sr), "mel", True
+
+
+def embed(paths, backend="auto"):
+    """Embed wav files. Returns (X, backend_used, used_fallback)."""
+    return embed_arrays([load16(p) for p in paths],
+                        backend=backend)
+
+
+def embed_segments(wav_path, bounds_s, sr=16000, backend="ast", cap=12):
+    """Embed (start_s, end_s) slices of one clip for per-call scoring.
+
+    Uniformly subsamples to ``cap`` segments so long files stay bounded.
+    Returns (X_seg, kept_index). Raises only on unreadable audio; empty
+    bounds give an empty (0, D) array with no indices.
+    """
+    from scipy.io import wavfile
+    from scipy.signal import resample_poly
+    from math import gcd
+    rate, data = wavfile.read(wav_path)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    data = np.asarray(data, dtype=np.float64)
+    if rate != sr:
+        g = gcd(rate, sr)
+        data = resample_poly(data, sr // g, rate // g)
+    n = len(bounds_s)
+    idx = [int(i * (n - 1) / (cap - 1)) for i in range(min(n, cap))] \
+        if n > cap else list(range(n))
+    arrs = []
+    for i in idx:
+        t0, t1 = bounds_s[i]
+        s0, s1 = max(0, int(t0 * sr)), max(1, int(t1 * sr))
+        w = data[s0:s1].astype(np.float32)
+        arrs.append(w if len(w) else np.zeros(1, dtype=np.float32))
+    if not arrs:
+        return np.zeros((0, 128), dtype=np.float32), []
+    X, _, _ = embed_arrays(arrs, sr, backend=backend)
+    return X, idx
+
+
+def centroid_scores(X, centroids, labels, temperature=0.5):
+    """Cosine-to-centroid call scoring with softmax confidence.
+
+    centroids: {label: vector}; labels: ordered class list. Returns
+    (pred_idx, confidence) arrays. Pure numpy, no training involved.
+    """
+    C = np.stack([np.asarray(centroids[lab], dtype=float) for lab in labels])
+    Cn = C / (np.linalg.norm(C, axis=1, keepdims=True) + 1e-12)
+    Xn = np.asarray(X, dtype=float)
+    Xn = Xn / (np.linalg.norm(Xn, axis=1, keepdims=True) + 1e-12)
+    sims = Xn @ Cn.T / max(temperature, 1e-6)
+    sims = sims - sims.max(axis=1, keepdims=True)
+    exp = np.exp(np.clip(sims, -50, 50))
+    proba = exp / exp.sum(axis=1, keepdims=True)
+    pred = proba.argmax(axis=1)
+    return pred, proba.max(axis=1)
+
+
+def main(backend="auto"):
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import LeaveOneOut
     from sklearn.preprocessing import StandardScaler
@@ -85,9 +193,10 @@ def main():
     missing = [p for p in paths if not os.path.isfile(p)]
     if missing:
         raise FileNotFoundError(f"missing clips: {missing}")
-    print("embedding 12 clips with frozen AST (first run downloads weights)...")
-    X = embed(paths)
-    print(f"embeddings: {X.shape}")
+    print(f"embedding 12 clips (backend={backend}; auto falls back "
+          f"AST -> mel-pool, flagged)...")
+    X, used, fallback = embed(paths, backend=backend)
+    print(f"embeddings: {X.shape} backend={used} fallback={fallback}")
     Xs = StandardScaler().fit_transform(X)
     loo = LeaveOneOut()
     pred = np.zeros_like(y)
@@ -114,4 +223,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backend", default="auto",
+                    choices=["auto", "ast", "mel"])
+    main(**vars(ap.parse_args()))

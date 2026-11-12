@@ -10,5 +10,8 @@
   "other"
  ],
  "n": 43,
+ "embedding_backend": "ast",
+ "embedding_fallback": false,
+ "has_centroids": true,
  "note": "supervised head; rule-based match_species stays as the evidence baseline"
 }

@@ -46,6 +46,7 @@ def run_job(wav_path, outdir, params, progress_cb=None):
         use_deltas=params.get("use_deltas", False),
         fmax=params.get("fmax", 4000.0),
         denoise_backend=params.get("denoise_backend", "gating"),
+        unet_weights=params.get("unet_weights"),
         pcen_tau=params.get("pcen_tau", 0.06),
         pcen_s=params.get("pcen_s", 0.05),
         pcen_alpha=params.get("pcen_alpha", 0.98),
@@ -59,6 +60,11 @@ def run_job(wav_path, outdir, params, progress_cb=None):
         lowcut=params.get("lowcut", 50.0),
         frontend=params.get("frontend", "mel"),
         denoise_profile=params.get("denoise_profile", "flat"),
+        det_offset=params.get("det_offset", 1.0),
+        det_min_dur_s=params.get("det_min_dur_s", 0.20),
+        aug_spec=params.get("aug_spec", False),
+        aug_ship_snr=params.get("aug_ship_snr"),
+        aug_mixup=params.get("aug_mixup", False),
         synthetic_if_missing=True, synth_duration_s=6.0,
         progress_cb=progress_cb, use_cache=True,
     )
@@ -75,6 +81,7 @@ def run_batch_job(input_dir, outdir, params, progress_cb=None):
               use_deltas=params.get("use_deltas", False),
               fmax=params.get("fmax", 4000.0),
               denoise_backend=params.get("denoise_backend", "gating"),
+              unet_weights=params.get("unet_weights"),
               pcen_tau=params.get("pcen_tau", 0.06),
               pcen_s=params.get("pcen_s", 0.05),
               pcen_alpha=params.get("pcen_alpha", 0.98),
@@ -87,6 +94,11 @@ def run_batch_job(input_dir, outdir, params, progress_cb=None):
               frontend=params.get("frontend", "mel"),
               denoise_profile=params.get("denoise_profile", "flat"),
               ssl_weights=params.get("ssl_weights"),
+              det_offset=params.get("det_offset", 1.0),
+              det_min_dur_s=params.get("det_min_dur_s", 0.20),
+              aug_spec=params.get("aug_spec", False),
+              aug_ship_snr=params.get("aug_ship_snr"),
+              aug_mixup=params.get("aug_mixup", False),
               max_workers=params.get("max_workers", 1))
     if progress_cb is not None:
         try:

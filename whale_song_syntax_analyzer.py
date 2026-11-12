@@ -29,7 +29,7 @@ DEFAULT_K = 64
 DEFAULT_LOW = 50.0
 DEFAULT_HIGH = 4000.0
 # Bump when payload/artifact schema changes so old job caches go stale.
-CODEC_VERSION = 14
+CODEC_VERSION = 15
 
 # Filterbank cache: identical (bank, sr, n_fft, n_mels, fmin, fmax) builds the
 # same matrix, so reuse it across segments instead of rebuilding per segment.
@@ -202,18 +202,23 @@ def spectral_gate_denoise(x, sr, n_fft=2048, hop=512, prop_decrease=0.9,
     return x_d.astype(np.float32)
 
 
-def denoise_backend_available(backend="gating"):
+def denoise_backend_available(backend="gating", **kwargs):
     if str(backend).lower() == "noisereduce":
         try:
             import noisereduce  # noqa: F401
             return True
         except Exception:
             return False
+    if str(backend).lower() == "unet":
+        import os as _os
+        from unet_denoise import MODEL_PATH as _mp
+        return bool(_os.path.isfile(kwargs.get("unet_weights") or _mp))
     return True
 
 
 def denoise(x, sr, backend="gating", noise_profile="flat", **kwargs):
-    """Denoise dispatcher: hand-rolled gating (default) or noisereduce.
+    """Denoise dispatcher: hand-rolled gating (default), noisereduce, or
+    the learned U-Net mask (#5, falls back to gating when weights miss).
 
     backend="noisereduce" tries the ``noisereduce`` package (non-stationary
     mode, explicit noise profile) and falls back to the hand-rolled
@@ -221,6 +226,7 @@ def denoise(x, sr, backend="gating", noise_profile="flat", **kwargs):
     keep working. noise_profile="sea" weights the hand-rolled gate by a
     Wenz-like ambient prior. Returns (audio, used_fallback_bool).
     """
+    unet_weights = kwargs.pop("unet_weights", None)
     if str(backend).lower() == "noisereduce":
         try:
             import noisereduce as nr
@@ -232,6 +238,16 @@ def denoise(x, sr, backend="gating", noise_profile="flat", **kwargs):
         return spectral_gate_denoise(x, sr,
                                      noise_profile=noise_profile,
                                      **kwargs), True
+    if str(backend).lower() == "unet":
+        # Learned mask (#5); missing weights fall back to gating, flagged.
+        try:
+            from unet_denoise import unet_denoise as _unet
+            return _unet(np.asarray(x, dtype=np.float32), sr,
+                         weights_path=unet_weights)
+        except Exception:
+            pass
+        return spectral_gate_denoise(x, sr,
+                                     noise_profile=noise_profile), True
     return spectral_gate_denoise(x, sr, noise_profile=noise_profile,
                                  **kwargs), False
 
@@ -242,10 +258,15 @@ def denoise(x, sr, backend="gating", noise_profile="flat", **kwargs):
 
 def _frame_harmonicity(frames, sr, fmin=40.0, fmax=1000.0,
                          chunk=2048):
-    """Voicing strength per frame via FFT autocorrelation peak (0..~1).
+    """Voicing strength per frame, autocorr peak blended with YIN (0..~1).
 
     Tonal/FM whale units correlate strongly at pitch lags; broadband
-    boat/wind noise does not. Chunked so long songs stay in memory.
+    boat/wind noise does not. YIN's cumulative-mean-normalized
+    difference (de Cheveigne & Kawahara 2002) is computed from the same
+    FFT autocorrelation (d = 2*(1-ac) on normalized frames) and is more
+    robust for low-SNR tonal units, e.g. 20 Hz fin pulses in 2 kHz
+    archival audio where the lag fits comfortably in-frame. The blend
+    takes the stronger witness. Chunked so long songs stay in memory.
     """
     n = frames.shape[1]
     lo = max(2, int(sr / fmax))
@@ -257,7 +278,14 @@ def _frame_harmonicity(frames, sr, fmin=40.0, fmax=1000.0,
         F = np.fft.rfft(f, n=4096, axis=1)
         ac = np.fft.irfft(np.abs(F) ** 2, n=4096, axis=1)[:, :n // 2]
         ac /= (ac[:, :1] + 1e-12)
-        out[s:s + chunk] = ac[:, lo:hi + 1].max(axis=1)
+        auto = ac[:, lo:hi + 1].max(axis=1)
+        d = np.clip(2.0 * (1.0 - ac[:, 1:hi + 1]), 0.0, None)
+        cumsum = np.cumsum(d, axis=1)
+        tau = np.arange(1, d.shape[1] + 1)
+        cmnd = d / (cumsum / tau + 1e-12)
+        cmnd[:, 0] = 1.0
+        yin = 1.0 - cmnd[:, max(0, lo - 1):].min(axis=1)
+        out[s:s + chunk] = np.maximum(auto, np.clip(yin, 0.0, 1.0))
     return np.clip(out, 0.0, 1.0)
 
 
@@ -319,6 +347,81 @@ def vad_segments(x, sr, frame_len=2048, hop=512, offset_db=7.0,
 # ----------------------------------------------------------------------------
 # 128-bin log-mel (torchaudio/librosa optional accelerators, scipy fallback)
 # ----------------------------------------------------------------------------
+
+def _bin_center_hz(n_mels, fmin, fmax, frontend):
+    """Per-band center frequencies matching the frontend filterbanks."""
+    if frontend == "gammatone":
+        return _erb_to_hz(np.linspace(_hz_to_erb(fmin), _hz_to_erb(fmax),
+                                      n_mels)).astype(float)
+    pts = np.linspace(_hz_to_mel(fmin), _hz_to_mel(fmax), n_mels + 2)[1:-1]
+    return _mel_to_hz(pts).astype(float)
+
+
+def _bin_edge_hz(n_mels, fmin, fmax, frontend):
+    """Per-band edge frequencies (n_mels+1) so single-band boxes have width."""
+    if frontend == "gammatone":
+        fc = _erb_to_hz(np.linspace(_hz_to_erb(fmin), _hz_to_erb(fmax),
+                                    n_mels)).astype(float)
+        mid = (fc[:-1] + fc[1:]) / 2.0
+        lo = fc[0] - (mid[0] - fc[0])
+        hi = fc[-1] + (fc[-1] - mid[-1])
+        return np.concatenate([[lo], mid, [hi]])
+    pts = _mel_to_hz(np.linspace(_hz_to_mel(fmin), _hz_to_mel(fmax),
+                                 n_mels + 2))
+    # Triangular band i spans points[i]..points[i+2]; edges take midpoints
+    # of those spans so adjacent bands tile without gaps.
+    return np.concatenate([[pts[0]], (pts[:-2] + pts[2:]) / 2.0,
+                            [pts[-1]]]).astype(float)
+
+
+def detect_boxes(mel, sr=DEFAULT_SR, hop_ms=10.0, fmin=DEFAULT_LOW,
+                 fmax=DEFAULT_HIGH, frontend="mel", offset=1.0,
+                 min_dur_s=0.20, min_bw_hz=50.0, max_boxes=64):
+    """Time-frequency event boxes on a log-mel spectrogram.
+
+    Numpy baseline for the spectrogram-detector upgrade: per-band adaptive
+    threshold (median + offset in log units, ~8.7 dB at offset=1.0),
+    8-connected components, duration/bandwidth filters, score = mean
+    excess x sqrt(area). Multi-call windows that VAD merges into one
+    segment surface here as separate boxes. Returns [{t0_s, t1_s, f0_hz,
+    f1_hz, score}] sorted by score desc. Never raises on empty input.
+    """
+    try:
+        from scipy.ndimage import label as _label
+        m = np.asarray(mel, dtype=np.float64)
+        n, T = m.shape[0], m.shape[1]
+        if T < 2 or n < 2:
+            return []
+        m = m[:n]
+        thr = np.median(m, axis=1, keepdims=True) + float(offset)
+        mask = m > thr
+        if not mask.any():
+            return []
+        lab, nlab = _label(mask, structure=np.ones((3, 3), dtype=int))
+        fe_ = _bin_edge_hz(n, float(fmin), float(fmax), frontend)
+        hop_s = float(hop_ms) / 1000.0
+        min_f = max(1, int(float(min_dur_s) / hop_s))
+        boxes = []
+        for c in range(1, nlab + 1):
+            rows, cols = np.nonzero(lab == c)
+            if len(cols) < min_f or len(rows) < 1:
+                continue
+            f0, f1 = float(fe_[rows.min()]), float(fe_[rows.max() + 1])
+            if f1 - f0 < float(min_bw_hz) and len(np.unique(rows)) < 2:
+                continue
+            exc = float((m[rows, cols] - thr[rows, 0]).mean())
+            score = exc * float(np.sqrt(len(rows) * len(cols)))
+            if score <= 0:
+                continue
+            boxes.append({"t0_s": round(float(cols.min()) * hop_s, 3),
+                         "t1_s": round(float(cols.max() + 1) * hop_s, 3),
+                         "f0_hz": round(f0, 1), "f1_hz": round(f1, 1),
+                         "score": round(score, 3)})
+        boxes.sort(key=lambda b: -b["score"])
+        return boxes[:max(1, int(max_boxes))]
+    except Exception:
+        return []
+
 
 def _hz_to_mel(f):
     return 2595.0 * np.log10(1.0 + f / 700.0)
@@ -1480,6 +1583,47 @@ def clip_band_energy(x, sr):
             "centroid_hz": round(float((spec * freqs).sum() / tot), 1)}
 
 
+def waveform_stats(x, sr):
+    """Raw-waveform branch features (#3 dual-path): time-domain descriptors
+    the mel branch cannot see — zero-crossing rate, crest factor, voicing
+    strength, and spectral shape from one FFT. Numpy-only, fixed length 8.
+    """
+    import numpy as _np
+    x = _np.asarray(x[:sr * 120], dtype=_np.float64)
+    x = x - x.mean()
+    n = max(len(x), 1)
+    rms = float(_np.sqrt((x ** 2).mean()) + 1e-12)
+    zc = float((x[:-1] * x[1:] < 0).mean()) if n > 1 else 0.0
+    crest = float(_np.abs(x).max() / rms)
+    harm = float(_np.mean(_frame_harmonicity(
+        x[: (len(x) // 2048) * 2048].reshape(-1, 2048), sr))) \
+        if n >= 2048 else 0.0
+    win = x * _np.hanning(n)
+    spec = _np.abs(_np.fft.rfft(win)) + 1e-12
+    freqs = _np.fft.rfftfreq(n, 1.0 / sr)
+    tot = float(spec.sum())
+    centroid = float((spec * freqs).sum() / tot)
+    cum = _np.cumsum(spec) / tot
+    rolloff = float(freqs[min(len(freqs) - 1,
+                              int(_np.searchsorted(cum, 0.85)))])
+    low = float(spec[freqs < 200].sum() / tot)
+    return [rms, zc, crest, harm, centroid / 4000.0, rolloff / 4000.0,
+            low, float(spec[freqs < 500].sum() / tot)]
+
+
+def dual_path_features(x, sr, mel=None):
+    """Waveform + mel concatenation (#3): 8 time-domain stats beside
+    mean/std-pooled mel bands. Fixed length 8 + 2 * n_mels, deterministic.
+    """
+    import numpy as _np
+    w = waveform_stats(x, sr)
+    if mel is None:
+        mel = log_mel(_np.asarray(x, dtype=_np.float32), sr)
+    m = _np.asarray(mel, dtype=_np.float64).reshape(mel.shape[0], -1)
+    return _np.concatenate([_np.asarray(w),
+                            m.mean(axis=1), m.std(axis=1)]).tolist()
+
+
 def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None,
                   n_diverse=None):
     # n_diverse: repeat phrases containing >=2 distinct tokens. A pulse
@@ -1551,10 +1695,18 @@ def match_species(stats, meta, metrics, n_phrases, n_themes, clip_e=None,
         (frac_plow >= 0.6, 1.2,
          f"{frac_plow * 100:.0f}% of units peak below 200Hz "
          f"(low-frequency moans)"))
-    checks["blue"].append(
-        (med_dur >= 5.0, 0.8,
-         f"median unit {med_dur:.1f}s "
-         f"({'long moans' if med_dur >= 5 else 'short units'})"))
+    # Blue call-type duration prior: B-calls run 10-20 s, A-calls
+    # ~8 s (McDonald), D-calls are short downsweeps handled elsewhere.
+    if med_dur >= 8.0:
+        checks["blue"].append(
+            (True, 1.6, f"median unit {med_dur:.1f}s (B-call long moan)"))
+    elif med_dur >= 3.0:
+        checks["blue"].append(
+            (True, 0.8, f"median unit {med_dur:.1f}s (A-call moan)"))
+    else:
+        checks["blue"].append(
+            (False, 1.0, f"median unit {med_dur:.1f}s "
+             f"(too short for a blue moan)"))
     checks["fin"].append(
         (frac_vlow >= 0.6 and med_dur <= 2.5 and n_units >= 2, 1.0,
          f"{frac_vlow * 100:.0f}% of peaks below 80Hz, "
@@ -1615,12 +1767,45 @@ _SPECIES_MODEL = None
 _SPECIES_MODEL_TRIED = False
 
 
+def _segment_species_predict(input_path, segments, model):
+    """Per-call species scoring: nearest-centroid label per VAD segment.
+
+    Uses the shipped class centroids (train_species.py) with the same
+    embedding backend, capped at 12 segments. Returns a list of
+    {segment, label, confidence} plus the fraction agreeing with the
+    clip-level label, or None when unavailable. Never raises.
+    """
+    try:
+        centroids = model.get("centroids") or {}
+        backend = model.get("centroid_backend", "none")
+        labels = model.get("labels", [])
+        if not centroids or backend == "none" or not segments:
+            return None
+        from train_probe import embed_segments, centroid_scores
+        bounds = [(float(s.get("start_s", 0.0)),
+                   float(s.get("end_s", 0.0))) for s in segments]
+        Xs, kept = embed_segments(input_path, bounds, backend=backend)
+        if len(Xs) == 0:
+            return None
+        pred, conf = centroid_scores(Xs, centroids, labels)
+        calls = [{"segment": int(segments[kept[i]].get(
+            "id", kept[i])),
+            "label": labels[int(pred[i])],
+            "confidence": round(float(conf[i]), 2)}
+            for i in range(len(kept))]
+        return calls
+    except Exception:
+        return None
+
+
 def _species_model_predict(metrics, code_perp, codes_used, seqs, K,
-                         input_path=None):
+                         input_path=None, segments=None):
     """Supervised species head (train_species.py winner), loaded on demand.
 
     Returns None when no trained head is shipped. Never raises: the
     rule-based species_hint stays the evidence baseline either way.
+    When the head ships class centroids, per-call segment labels ride
+    along under the "segment_species" key.
     """
     global _SPECIES_MODEL, _SPECIES_MODEL_TRIED
     if not _SPECIES_MODEL_TRIED:
@@ -1690,6 +1875,11 @@ def _species_model_predict(metrics, code_perp, codes_used, seqs, K,
                     if 0 <= t < K:
                         h[t] += 1
             x = (h / max(h.sum(), 1)).reshape(1, -1)
+        elif kind == "D":
+            # Dual-path head: waveform stats + pooled mel from the clip.
+            xd_, _sr = load_wav(input_path)
+            x = _np.asarray(dual_path_features(xd_, _sr),
+                            dtype=float).reshape(1, -1)
         else:
             m = metrics
             x = _np.array([[
@@ -1702,14 +1892,21 @@ def _species_model_predict(metrics, code_perp, codes_used, seqs, K,
         labels = _SPECIES_MODEL.get("labels", [])
         proba = clf.predict_proba(sc.transform(x))[0]
         i = int(_np.argmax(proba))
-        return {"label": labels[i] if i < len(labels) else "unassigned",
-                "confidence": round(float(proba[i]), 2),
-                "model": kind + ":logreg",
-                "top3": sorted(
-                    ((labels[j] if j < len(labels) else str(j),
-                      round(float(proba[j]), 2))
-                     for j in range(len(proba))),
-                    key=lambda kv: -kv[1])[:3]}
+        out = {"label": labels[i] if i < len(labels) else "unassigned",
+               "confidence": round(float(proba[i]), 2),
+               "model": kind + ":logreg",
+               "top3": sorted(
+                   ((labels[j] if j < len(labels) else str(j),
+                     round(float(proba[j]), 2))
+                    for j in range(len(proba))),
+                   key=lambda kv: -kv[1])[:3]}
+        seg = _segment_species_predict(input_path, segments or [],
+                                       _SPECIES_MODEL)
+        if seg is not None:
+            out["segment_species"] = seg
+            agree = [c for c in seg if c["label"] == out["label"]]
+            out["segment_agreement"] = round(len(agree) / len(seg), 3)
+        return out
     except Exception:
         return None
 
@@ -1803,11 +2000,13 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
                  use_deltas=False, fmax=DEFAULT_HIGH, progress_cb=None,
                  use_cache=True, denoise_backend="gating",
                  pcen_tau=0.06, pcen_s=0.05, pcen_alpha=0.98,
-                 ssl_weights=None, pcen_preset=None,
+                 ssl_weights=None, unet_weights=None, pcen_preset=None,
                  vad_offset_db=7.0, vad_hangover_s=0.25,
                  vad_min_unit_s=0.25, vad_merge_gap_s=0.20,
                  raven_import_path=None, lowcut=DEFAULT_LOW,
-                 frontend="mel", denoise_profile="flat"):
+                 frontend="mel", denoise_profile="flat",
+                 det_offset=1.0, det_min_dur_s=0.20,
+                 aug_spec=False, aug_ship_snr=None, aug_mixup=False):
     import torch
     import time as _time
     torch.set_num_threads(max(1, os.cpu_count() or 1))
@@ -1889,7 +2088,8 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
     _t = _time.perf_counter()
     xb = bandpass(x, sr, low=lowcut)
     xd, denoise_fallback = denoise(xb, sr, backend=denoise_backend,
-                                      noise_profile=denoise_profile)
+                                      noise_profile=denoise_profile,
+                                      unet_weights=unet_weights)
     _timings["denoise_s"] = round(_time.perf_counter() - _t, 3)
     _emit(progress_cb, "vad", 0.35)
     _t = _time.perf_counter()
@@ -1908,6 +2108,17 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
     if not bounds:
         bounds = [[0.0, dur]]
     _timings["vad_s"] = round(_time.perf_counter() - _t, 3)
+    # 1b) Spectrogram event boxes (#2): time-frequency detections on one
+    # full-clip log-mel pass (base bands only, never deltas).
+    _t = _time.perf_counter()
+    clip_mel = log_mel(xd, sr, fmax=fmax, use_pcen=use_pcen,
+                       use_deltas=False, pcen_tau=pcen_tau, pcen_s=pcen_s,
+                       pcen_alpha=pcen_alpha, frontend=frontend)
+    det_boxes = detect_boxes(clip_mel, sr, fmax=fmax, frontend=frontend,
+                             offset=det_offset, min_dur_s=det_min_dur_s)
+    _timings["detect_s"] = round(_time.perf_counter() - _t, 3)
+    meta_box = {"n_boxes": len(det_boxes), "det_offset": det_offset,
+                "det_min_dur_s": det_min_dur_s}
     # 2) 128-bin mel per segment (mel / pcen-mel / +deltas, fmax flag).
     _t = _time.perf_counter()
     seg_mels, seg_rms = [], []
@@ -1919,13 +2130,45 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
                                 frontend=frontend))
         seg_rms.append(float(20 * np.log10(
             np.sqrt((seg.astype(np.float64) ** 2).mean()) + 1e-12)))
+    # 2b) Augmentations (#6): appended copies train the units only; clean
+    # segments alone are encoded for the LM, report, and playback.
+    fit_mels = list(seg_mels)
+    aug_info = {"aug_spec": bool(aug_spec),
+                "aug_ship_snr": aug_ship_snr,
+                "aug_mixup": bool(aug_mixup), "n_fit_extra": 0}
+    if aug_spec or aug_ship_snr is not None or aug_mixup:
+        _extra = []
+        if aug_spec:
+            from augment import augment_mel
+            for i, _m in enumerate(seg_mels):
+                _extra.append(augment_mel(_m, seed * 1000 + i))
+        if aug_ship_snr is not None:
+            from augment import augment_clip
+            for i, (s0, s1) in enumerate(bounds):
+                _seg = xd[int(s0 * sr):max(int(s0 * sr) + 1, int(s1 * sr))]
+                _a = augment_clip(_seg, sr, seed * 2000 + i,
+                                  ship_snr=aug_ship_snr)
+                _extra.append(log_mel(_a, sr, fmax=fmax, use_pcen=use_pcen,
+                                      use_deltas=use_deltas,
+                                      pcen_tau=pcen_tau, pcen_s=pcen_s,
+                                      pcen_alpha=pcen_alpha,
+                                      frontend=frontend))
+        if aug_mixup and len(seg_mels) >= 2:
+            from augment import mixup as _mixup
+            for i in range(0, len(seg_mels) - 1, 2):
+                _mx, _lam = _mixup(seg_mels[i], seg_mels[i + 1], lam=None,
+                                   seed=seed * 3000 + i)
+                _extra.append(_mx)
+        fit_mels.extend(_extra)
+        aug_info["n_fit_extra"] = len(_extra)
     # 3) Unit discovery: vqvae | kmeans | fsq | ssl-kmeans | encodec-rvq.
     units = str(units).lower().replace("_", "-")
     vq_hist_label = "VQ-VAE train loss"
     ssl_fallback = None
+    meta_ssl = None
     if units == "kmeans":
         vq = KMeansUnits(K=K, seed=seed)
-        vq_stats = vq.fit(seg_mels)
+        vq_stats = vq.fit(fit_mels)
         vq_hist_label = "kmeans (no training loss)"
         import numpy as _np
         codebook = _np.asarray(vq.km.cluster_centers_,
@@ -1933,13 +2176,13 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
         seqs = [vq.encode_tokens(m) for m in seg_mels]
     elif units == "fsq":
         vq = FSQUnits(K=K, seed=seed)
-        vq_stats = vq.fit(seg_mels)
+        vq_stats = vq.fit(fit_mels)
         vq_hist_label = "FSQ (no training loss)"
         codebook = vq.codebook_matrix()
         seqs = [vq.encode_tokens(m) for m in seg_mels]
     elif units == "ssl-kmeans":
         vq = SSLEmbeddingUnits(K=K, seed=seed, weights_path=ssl_weights)
-        vq_stats = vq.fit(seg_mels)
+        vq_stats = vq.fit(fit_mels)
         ssl_fallback = bool(vq.used_fallback)
         vq_hist_label = "ssl-kmeans (fallback mel, no training loss)" \
             if ssl_fallback else "ssl-kmeans (no training loss)"
@@ -1949,15 +2192,29 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
         seqs = [vq.encode_tokens(m) for m in seg_mels]
     elif units == "encodec-rvq":
         vq = EncodecRVQUnits(K=K, seed=seed)
-        vq_stats = vq.fit(seg_mels)
+        vq_stats = vq.fit(fit_mels)
         vq_hist_label = "encodec-rvq (experimental, no training loss)"
         codebook = vq.codebook_matrix()
         seqs = [vq.encode_tokens(m) for m in seg_mels]
+    elif units == "hubert-iter":
+        from contrast_ssl import hubert_iter_units
+        with _TRAIN_LOCK:
+            set_seed(seed)
+            raw, codebook, ssl_info = hubert_iter_units(
+                fit_mels, K=K, seed=seed)
+        meta_ssl = dict(ssl_info)
+        vq_hist_label = ("hubert-iter contrastive retokenize"
+                         if meta_ssl.get("contrastive")
+                         else "hubert-iter (round-0 kmeans fallback)")
+        vq_stats = {"loss_history": [0.0]}
+        # Clean segments only for the LM; augmented copies trained units.
+        seqs = [dedup([int(t) for t in s[::4]])
+                for s in raw[:len(seg_mels)]]
     else:
         units = "vqvae"
         with _TRAIN_LOCK:
             set_seed(seed)
-            vq, vq_stats = train_vqvae(seg_mels, K=K, epochs=epochs_vq,
+            vq, vq_stats = train_vqvae(fit_mels, K=K, epochs=epochs_vq,
                                        ema=vq_ema, seed=seed,
                                        n_mels=seg_mels[0].shape[0])
         with torch.no_grad():
@@ -2037,6 +2294,11 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
             "frontend": str(frontend),
             "denoise_profile": str(denoise_profile),
             "denoise_fallback": bool(denoise_fallback),
+            "det_offset": det_offset, "det_min_dur_s": det_min_dur_s,
+            "n_boxes": len(det_boxes),
+            "aug_spec": bool(aug_spec), "aug_ship_snr": aug_ship_snr,
+            "aug_mixup": bool(aug_mixup),
+            "n_fit_extra": aug_info["n_fit_extra"],
             "pcen_tau": pcen_tau, "pcen_s": pcen_s,
             "pcen_alpha": pcen_alpha, "pcen_preset": str(pcen_preset),
             "vad_offset_db": vad_offset_db,
@@ -2047,6 +2309,8 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
         meta["ssl_fallback"] = bool(ssl_fallback)
         if ssl_weights:
             meta["ssl_weights"] = str(ssl_weights)
+    if meta_ssl is not None:
+        meta["hubert_iter"] = dict(meta_ssl)
     metrics_for_hints = {"shuffle_gap_nats": shuffle_gap,
                          "trigram_gap_nats": gap_nats}
     try:
@@ -2071,7 +2335,8 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
     meaning_tags = provisional_meaning_tags(segments, metrics_for_hints,
                                             phrases=phrases)
     species_model = _species_model_predict(
-        metrics, code_perp, codes_used, seqs, K, input_path)
+        metrics, code_perp, codes_used, seqs, K, input_path,
+        segments=segments)
     tsyntax = theme_syntax([s.get("theme", 0) for s in segments])
     _timings["syntax_s"] = round(_time.perf_counter() - _t, 3)
     _timings["total_s"] = round(_time.perf_counter() - _t0, 3)
@@ -2086,6 +2351,7 @@ def run_pipeline(input_path, outdir, epochs_vq=5, epochs_lm=5, K=DEFAULT_K,
                "theme_syntax": tsyntax,
                "species_hint": species_hint,
                "species_model": species_model,
+               "detections": det_boxes,
                "meaning_tags": meaning_tags,
                "codebook_vectors": codebook,
                "codebook": {"K": K, "dim": len(codebook[0]),
@@ -2292,15 +2558,24 @@ def build_parser():
     p.add_argument("--block-size", type=int, default=64)
     p.add_argument("--units", default="vqvae",
                    choices=["vqvae", "kmeans", "fsq", "ssl-kmeans",
-                            "encodec-rvq"],
+                            "encodec-rvq", "hubert-iter"],
                    help="acoustic unit discovery backend")
     p.add_argument("--ssl-weights", default=None,
                    help="local AVES/Animal2Vec-style weights for ssl-kmeans; "
                         "offline fallback pools mel when absent")
     p.add_argument("--denoise-backend", default="gating",
-                   choices=["gating", "noisereduce"],
-                   help="denoise: hand-rolled stationary gate (default) or "
-                        "noisereduce non-stationary (falls back if missing)")
+                   choices=["gating", "noisereduce", "unet"],
+                   help="denoise: hand-rolled stationary gate (default), "
+                        "noisereduce non-stationary, or learned U-Net mask "
+                        "(falls back if missing)")
+    p.add_argument("--unet-weights", default=None,
+                   help="U-Net mask weights path (default models/unet_denoiser.pt)")
+    p.add_argument("--aug-spec", action="store_true",
+                   help="SpecAugment copies train the units (inference clean)")
+    p.add_argument("--aug-ship-snr", type=float, default=None,
+                   help="inject ship noise at this SNR dB into unit-training copies")
+    p.add_argument("--aug-mixup", action="store_true",
+                   help="mixup pairs train the units (inference clean)")
     p.add_argument("--use-pcen", action="store_true",
                    help="use PCEN frontend instead of log-mel")
     p.add_argument("--pcen-tau", type=float, default=0.06,
@@ -2330,6 +2605,11 @@ def build_parser():
     p.add_argument("--denoise-profile", default="flat",
                    choices=["flat", "sea"],
                    help="hand-rolled gate weighting: flat or Wenz-like sea")
+    p.add_argument("--det-offset", type=float, default=1.0,
+                   help="box detector threshold above per-band median "
+                        "(log units; 1.0 ~= 8.7 dB)")
+    p.add_argument("--det-min-dur-s", type=float, default=0.20,
+                   help="box detector minimum event duration in seconds")
     p.add_argument("--synthetic-if-missing", action="store_true",
                    help="generate a synthetic fixture WAV when --input is absent")
     p.add_argument("--synth-duration-s", type=float, default=12.0)
@@ -2352,7 +2632,13 @@ def main(argv=None):
                    vad_merge_gap_s=args.vad_merge_gap_s,
                    raven_import_path=args.raven_import,
                    lowcut=args.lowcut, frontend=args.frontend,
-                   denoise_profile=args.denoise_profile)
+                   denoise_profile=args.denoise_profile,
+                   det_offset=args.det_offset,
+                   det_min_dur_s=args.det_min_dur_s,
+                   unet_weights=args.unet_weights,
+                   aug_spec=args.aug_spec,
+                   aug_ship_snr=args.aug_ship_snr,
+                   aug_mixup=args.aug_mixup)
     if args.input_dir:
         res = run_batch(args.input_dir, args.outdir,
                         epochs_vq=args.epochs_vq, epochs_lm=args.epochs_lm,

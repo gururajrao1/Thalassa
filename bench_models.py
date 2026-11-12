@@ -19,6 +19,9 @@ CONFIGS = [
     ("vqvae/mel-1ep", {"units": "vqvae", "frontend": "mel", "use_pcen": False}),
     ("ssl-kmeans/mel", {"units": "ssl-kmeans", "frontend": "mel", "use_pcen": False}),
     ("encodec-rvq/mel", {"units": "encodec-rvq", "frontend": "mel", "use_pcen": False}),
+    ("hubert-iter/mel", {"units": "hubert-iter", "frontend": "mel", "use_pcen": False}),
+    ("fsq/aug-ship", {"units": "fsq", "frontend": "mel", "use_pcen": False,
+                       "aug_spec": True, "aug_ship_snr": 5.0}),
 ]
 
 BASE = {"epochs_vq": 1, "epochs_lm": 1, "gpt_layers": 1, "gpt_dim": 32,
